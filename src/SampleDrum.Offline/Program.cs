@@ -38,7 +38,7 @@ public static class Program
 
     private static int Run(Options o)
     {
-        var mic = WavFile.ReadMonoAtRate(o.Mic!, EngineRate, out var micNote);
+        var mic = WavFile.ReadMonoAtRate(o.Mic!, EngineRate, o.Channel - 1, out var micNote);
         if (micNote != null) Console.WriteLine($"Aviso: {micNote}");
 
         float[]? sample = null;
@@ -83,6 +83,18 @@ public static class Program
         {
             WavFile.WriteMono(o.Out, result.Output, EngineRate, o.Format);
             Console.WriteLine($"WAV de saída (só o trigger): {o.Out} ({o.Format}, {EngineRate} Hz, mono)");
+        }
+
+        if (o.EventsOut != null)
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine($"# Onsets detectados em {Path.GetFileName(o.Mic)} (48 kHz). Pode ser usado como --expected.");
+            sb.AppendLine("sample_index,time_ms,peak_db,velocity,retrigger");
+            foreach (var e in result.Events)
+                sb.AppendLine(string.Format(Inv, "{0},{1:F3},{2:F1},{3:F3},{4}", e.SampleIndex, e.SampleIndex * 1000.0 / EngineRate,
+                    Db.FromLinear(e.Peak), e.Velocity, e.IsRetrigger ? 1 : 0));
+            File.WriteAllText(o.EventsOut, sb.ToString(), new UTF8Encoding(false));
+            Console.WriteLine($"Onsets gravados em: {o.EventsOut}");
         }
 
         if (o.Expected != null)
@@ -201,6 +213,8 @@ public static class Program
               --min-gain-db X        ganho do sample com velocity 0 (padrão -20; velocity 1 = 0 dB)
               --fixed-velocity       todo golpe toca a 0 dB
               --format float|pcm24|pcm16   formato do WAV de saída (padrão float)
+              --channel N            usa só o canal N (1, 2, ...) do --mic; padrão: média de todos os canais
+              --events-out arq.csv   grava os onsets detectados (formato aceito por --expected)
               --expected arquivo.csv compara com os onsets esperados (coluna sample_index ou time_ms)
               --tolerance-ms X       tolerância da comparação (padrão 2)
 
@@ -211,7 +225,8 @@ public static class Program
     private sealed class Options
     {
         public bool Help;
-        public string? Mic, Sample, Out, Expected, GenerateDir;
+        public string? Mic, Sample, Out, Expected, GenerateDir, EventsOut;
+        public int Channel; // 1-based; 0 = mono downmix
         public int Block = 128;
         public float? ThresholdDb, DetectMs, RearmDb, RearmMs, MinIntervalMs, RetriggerDb, ScanMs, ReleaseMs, HpfHz, LpfHz, MinGainDb;
         public bool FixedVelocity;
@@ -256,6 +271,12 @@ public static class Program
                     case "--sample": o.Sample = Next(); break;
                     case "--out": o.Out = Next(); break;
                     case "--expected": o.Expected = Next(); break;
+                    case "--events-out": o.EventsOut = Next(); break;
+                    case "--channel":
+                        var ch = Next();
+                        if (!int.TryParse(ch, NumberStyles.Integer, Inv, out o.Channel) || o.Channel < 1)
+                            throw new ArgumentException($"--channel inválido '{ch}' (1, 2, ...).");
+                        break;
                     case "--generate-synthetic": o.GenerateDir = Next(); break;
                     case "--block":
                         var b = Next();

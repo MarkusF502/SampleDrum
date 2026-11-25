@@ -45,6 +45,28 @@ public class WavFileTests
     }
 
     [Fact]
+    public void Stereo_SingleChannelSelection()
+    {
+        using var ms = new MemoryStream();
+        using (var bw = new BinaryWriter(ms, System.Text.Encoding.ASCII, leaveOpen: true))
+        {
+            float[] frames = { 0.5f, -0.25f, 0.125f, 0.75f }; // L,R,L,R
+            bw.Write("RIFF"u8); bw.Write(0u); bw.Write("WAVE"u8);
+            bw.Write("fmt "u8); bw.Write(16u); bw.Write((ushort)3); bw.Write((ushort)2); bw.Write(48000); bw.Write(48000 * 8); bw.Write((ushort)8); bw.Write((ushort)32);
+            bw.Write("data"u8); bw.Write((uint)(frames.Length * 4));
+            foreach (var f in frames) bw.Write(f);
+        }
+        ms.Position = 0;
+        Assert.Equal(new[] { 0.5f, 0.125f }, WavFile.Read(ms, 0).Mono);
+        ms.Position = 0;
+        Assert.Equal(new[] { -0.25f, 0.75f }, WavFile.Read(ms, 1).Mono);
+        ms.Position = 0;
+        Assert.Equal(new[] { 0.125f, 0.4375f }, WavFile.Read(ms, -1).Mono);
+        ms.Position = 0;
+        Assert.Throws<ArgumentOutOfRangeException>(() => WavFile.Read(ms, 2));
+    }
+
+    [Fact]
     public void Pcm24_NegativeValuesSignExtended()
     {
         using var ms = new MemoryStream();

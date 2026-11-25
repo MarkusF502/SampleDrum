@@ -25,13 +25,19 @@ public static class WavFile
     private const ushort FormatFloat = 3;
     private const ushort FormatExtensible = 0xFFFE;
 
-    public static WavData Read(string path)
+    public static WavData Read(string path) => Read(path, -1);
+
+    public static WavData Read(Stream stream) => Read(stream, -1);
+
+    /// <summary>Reads one channel (0-based) of a multichannel file, or the mono downmix when <paramref name="channel"/> is -1.</summary>
+    public static WavData Read(string path, int channel)
     {
         using var fs = File.OpenRead(path);
-        return Read(fs);
+        return Read(fs, channel);
     }
 
-    public static WavData Read(Stream stream)
+    /// <summary>Reads one channel (0-based) of a multichannel stream, or the mono downmix when <paramref name="channel"/> is -1.</summary>
+    public static WavData Read(Stream stream, int channel)
     {
         using var br = new BinaryReader(stream, Encoding.ASCII, leaveOpen: true);
         if (ReadTag(br) != "RIFF") throw new InvalidDataException("Arquivo não é RIFF/WAV.");
@@ -90,13 +96,19 @@ public static class WavFile
         int frames = data.Length / frameBytes;
 
         var mono = new float[frames];
-        float inv = 1f / channels;
+        if (channel < -1 || channel >= channels)
+            throw new ArgumentOutOfRangeException(nameof(channel), channel,
+                $"O arquivo tem {channels} canal(is); canal pedido: {channel + 1}.");
+        int firstCh = channel < 0 ? 0 : channel;
+        int nCh = channel < 0 ? channels : 1;
+        float inv = 1f / nCh;
         var span = data.AsSpan();
         for (int f = 0; f < frames; f++)
         {
             int off = f * frameBytes;
             float sum = 0f;
-            for (int c = 0; c < channels; c++, off += bytesPerSample)
+            off += firstCh * bytesPerSample;
+            for (int c = 0; c < nCh; c++, off += bytesPerSample)
                 sum += Decode(span.Slice(off, bytesPerSample), bits, isFloat);
             mono[f] = sum * inv;
         }
@@ -121,10 +133,18 @@ public static class WavFile
     /// <paramref name="note"/> is a pt-BR message describing any conversion, otherwise null.
     /// </summary>
     public static float[] ReadMonoAtRate(string path, int targetSampleRate, out string? note)
+        => ReadMonoAtRate(path, targetSampleRate, -1, out note);
+
+    /// <summary>
+    /// Like <see cref="ReadMonoAtRate(string, int, out string?)"/>, but takes one channel (0-based) of a
+    /// multichannel file instead of the downmix when <paramref name="channel"/> &gt;= 0.
+    /// </summary>
+    public static float[] ReadMonoAtRate(string path, int targetSampleRate, int channel, out string? note)
     {
-        var wav = Read(path);
+        var wav = Read(path, channel);
         var notes = new List<string>();
-        if (wav.Channels != 1) notes.Add($"{wav.Channels} canais convertidos para mono (média)");
+        if (channel >= 0 && wav.Channels != 1) notes.Add($"usando só o canal {channel + 1} de {wav.Channels}");
+        else if (wav.Channels != 1) notes.Add($"{wav.Channels} canais convertidos para mono (média)");
         float[] result = wav.Mono;
         if (wav.SampleRate != targetSampleRate)
         {

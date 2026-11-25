@@ -138,7 +138,7 @@ public sealed class TriggerEngine : IBlockProcessor
 
     /// <summary>
     /// Called off the audio thread; atomic reference swap. Samples must already be mono at
-    /// <see cref="SampleRate"/> (see <see cref="WavFile.ReadMonoAtRate"/>). The engine keeps the reference:
+    /// <see cref="SampleRate"/> (see <see cref="WavFile.ReadMonoAtRate(string, int, out string?)"/>). The engine keeps the reference:
     /// do not modify the array afterwards. Voices already playing finish with the previous sample.
     /// Pass an empty array to unload.
     /// </summary>

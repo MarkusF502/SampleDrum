@@ -86,7 +86,12 @@ onset reportado (±2 ms quando o passa-baixas está ligado, por causa do atraso 
    ... --scan-ms 2                 # velocity pelo pico real do golpe, +1,5 ms de latência
    ... --lpf-hz 150                # rejeitar vazamento de caixa/tons
    ... --retrigger-db 0            # comportamento parecido com o LSP (sem redisparo no sustain)
+   ... --channel 2                 # usa só a faixa 2 de um WAV multicanal (padrão: média das faixas)
+   ... --events-out onsets.csv     # grava os onsets detectados; o arquivo serve de --expected para outra faixa
    ```
+
+   Medir atraso entre duas faixas (ex.: CH 21 e Aux 1 gravados juntos): rode a faixa 1 com `--events-out`
+   e depois a faixa 2 com `--expected` desse arquivo e `--tolerance-ms 50`; o erro por evento é o atraso.
 
 Todas as opções: `dotnet run --project src/SampleDrum.Offline -- --help`.
 Números usam ponto decimal (`--threshold-db -27.5`). `--threshold-db` move o release junto (mantém −6 dB),
