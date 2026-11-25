@@ -19,4 +19,7 @@ public readonly record struct TriggerEvent(long SampleIndex, float Peak, float V
 
     /// <summary>Linear gain applied to the voice (velocity, dynamics and output gain combined).</summary>
     public float Gain { get; init; }
+
+    /// <summary>True when accepted during the previous hit's sustain via <see cref="TriggerSettings.RetriggerRiseDb"/>.</summary>
+    public bool IsRetrigger { get; init; }
 }

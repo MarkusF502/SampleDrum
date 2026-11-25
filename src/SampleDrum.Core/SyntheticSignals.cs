@@ -80,9 +80,10 @@ public static class SyntheticSignals
     }
 
     /// <summary>
-    /// The standard synthetic kick-mic track (~9 s): -60 dBFS noise floor; hard, soft and medium hits;
+    /// The standard synthetic kick-mic track (~9 s): -60 dBFS noise floor; hard (-3), soft (-12) and medium hits;
     /// one hit with a long low-frequency sustain; two close hits 100 ms apart; a hit that starts 3 samples
-    /// before <see cref="CommonBlockBoundary"/>; and a velocity ladder (-24/-18/-12/-6 dBFS).
+    /// before <see cref="CommonBlockBoundary"/>; and a velocity ladder (-18/-13/-8/-3 dBFS). The weakest hit is
+    /// 12 dB above the default -24 dBFS threshold, as recommended in docs/research/lsp-trigger.md.
     /// </summary>
     public static (float[] Mic, IReadOnlyList<SyntheticHit> Hits) MicTrack(int sampleRate)
     {
@@ -90,15 +91,15 @@ public static class SyntheticSignals
         var hits = new List<SyntheticHit>
         {
             new(Ms(500, sampleRate), -3f, 120f, "forte"),
-            new(Ms(1200, sampleRate), -20f, 80f, "suave"),
+            new(Ms(1200, sampleRate), -12f, 80f, "suave"),
             new(Ms(2000, sampleRate), -6f, 300f, "sustain longo"),
             new(Ms(3500, sampleRate), -6f, 12f, "proximo-1"),
             new(Ms(3600, sampleRate), -6f, 12f, "proximo-2 (+100 ms)"),
             new(CommonBlockBoundary - 3, -8f, 60f, "atravessa fronteira de bloco"),
-            new(Ms(6000, sampleRate), -24f, 60f, "escada -24 dB"),
-            new(Ms(6500, sampleRate), -18f, 60f, "escada -18 dB"),
-            new(Ms(7000, sampleRate), -12f, 60f, "escada -12 dB"),
-            new(Ms(7500, sampleRate), -6f, 60f, "escada -6 dB"),
+            new(Ms(6000, sampleRate), -18f, 60f, "escada -18 dB"),
+            new(Ms(6500, sampleRate), -13f, 60f, "escada -13 dB"),
+            new(Ms(7000, sampleRate), -8f, 60f, "escada -8 dB"),
+            new(Ms(7500, sampleRate), -3f, 60f, "escada -3 dB"),
         };
         int seed = 100;
         foreach (var h in hits)

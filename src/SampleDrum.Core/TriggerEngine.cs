@@ -119,6 +119,7 @@ public sealed class TriggerEngine : IBlockProcessor
                 {
                     PlaybackSampleIndex = onset.FireIndex,
                     Gain = gain,
+                    IsRetrigger = onset.IsRetrigger,
                 });
             }
         }

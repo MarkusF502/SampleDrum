@@ -56,10 +56,14 @@ public static class Program
         Console.WriteLine($"Microfone: {o.Mic} ({mic.Length} amostras, {mic.Length * 1000.0 / EngineRate:F1} ms @ {EngineRate} Hz)");
         Console.WriteLine($"Bloco: {o.Block} amostras ({o.Block * 1000.0 / EngineRate:F2} ms)");
         Console.WriteLine(string.Format(Inv,
-            "Ajustes: limiar {0} dBFS, rearme {1} dBFS por {2} ms, intervalo mínimo {3} ms, janela de varredura {4} ms, " +
-            "release do envelope {5} ms, passa-altas {6}, dinâmica {7:P0}",
-            s.ThresholdDb, s.RearmDb, s.RearmTimeMs, s.MinIntervalMs, s.ScanMs, s.EnvelopeReleaseMs,
-            s.HighPassHz > 0 ? $"{s.HighPassHz.ToString(Inv)} Hz" : "desligado", s.Dynamics));
+            "Ajustes: limiar {0} dBFS, detect time {1} ms, rearme {2} dBFS ({3:+0.#;-0.#;0} dB) por {4} ms, intervalo mínimo {5} ms, " +
+            "redisparo {6}, janela de varredura {7} ms, release do envelope {8} ms, passa-altas {9}, passa-baixas {10}, " +
+            "ganho mínimo {11} dB{12}",
+            s.ThresholdDb, s.DetectTimeMs, s.RearmDb, s.ReleaseRelativeDb, s.RearmTimeMs, s.MinIntervalMs,
+            s.RetriggerRiseDb > 0 ? $"+{s.RetriggerRiseDb.ToString(Inv)} dB" : "desligado", s.ScanMs, s.EnvelopeReleaseMs,
+            s.HighPassHz > 0 ? $"{s.HighPassHz.ToString(Inv)} Hz" : "desligado",
+            s.LowPassHz > 0 ? $"{s.LowPassHz.ToString(Inv)} Hz" : "desligado",
+            s.MinGainDb, s.FixedVelocity ? " (velocity fixa)" : ""));
 
         var result = OfflineProcessor.Run(mic, sample, EngineRate, s, o.Block);
 
@@ -69,9 +73,9 @@ public static class Program
         foreach (var e in result.Events)
         {
             Console.WriteLine(string.Format(Inv,
-                "  #{0,-3} t={1,10:F3} ms  amostra={2,-9}  pico={3,6:F1} dBFS  vel={4:F2}  ganho={5,6:F1} dB  início do sample={6}",
+                "  #{0,-3} t={1,10:F3} ms  amostra={2,-9}  pico={3,6:F1} dBFS  vel={4:F2}  ganho={5,6:F1} dB  início do sample={6}{7}",
                 i++, e.SampleIndex * 1000.0 / EngineRate, e.SampleIndex, Db.FromLinear(e.Peak), e.Velocity,
-                Db.FromLinear(e.Gain), e.PlaybackSampleIndex));
+                Db.FromLinear(e.Gain), e.PlaybackSampleIndex, e.IsRetrigger ? "  (redisparo no sustain)" : ""));
         }
         if (result.DroppedEvents > 0) Console.WriteLine($"Aviso: {result.DroppedEvents} eventos descartados (fila cheia).");
 
@@ -184,14 +188,18 @@ public static class Program
 
             Opções:
               --block N              tamanho do bloco em amostras (padrão 128)
-              --threshold-db X       limiar de disparo em dBFS (padrão -30)
-              --rearm-db X           limiar de rearme em dBFS, <= limiar (padrão -40)
-              --rearm-ms X           tempo abaixo do rearme antes de rearmar (padrão 10)
-              --min-interval-ms X    intervalo mínimo entre disparos (padrão 50)
-              --scan-ms X            janela de busca do pico/velocity; 0 = dispara na hora (padrão 2)
-              --release-ms X         release do envelope (padrão 15)
-              --hpf-hz X             passa-altas no caminho de detecção; 0 = desligado (padrão 0)
-              --dynamics X           0..1, quanto o volume do sample segue a força do golpe (padrão 0.75)
+              --threshold-db X       limiar de disparo (detect) em dBFS (padrão -24)
+              --detect-ms X          debounce após o cruzamento; é latência (padrão 0.5; 0 = desligado)
+              --rearm-db X           nível de release/rearme em dBFS, <= limiar (padrão: limiar - 6)
+              --rearm-ms X           tempo abaixo do release antes de rearmar (padrão 15)
+              --min-interval-ms X    trava absoluta entre disparos (padrão 35)
+              --retrigger-db X       redisparo no sustain se o envelope subir X dB; 0 = desligado (padrão 9)
+              --scan-ms X            janela extra de busca do pico/velocity (padrão 0 = só o detect time)
+              --release-ms X         release do envelope peak-hold (padrão 20)
+              --hpf-hz X             passa-altas na detecção; 0 = desligado (padrão 40)
+              --lpf-hz X             passa-baixas na detecção; 0 = desligado (padrão 0)
+              --min-gain-db X        ganho do sample com velocity 0 (padrão -20; velocity 1 = 0 dB)
+              --fixed-velocity       todo golpe toca a 0 dB
               --format float|pcm24|pcm16   formato do WAV de saída (padrão float)
               --expected arquivo.csv compara com os onsets esperados (coluna sample_index ou time_ms)
               --tolerance-ms X       tolerância da comparação (padrão 2)
@@ -205,7 +213,8 @@ public static class Program
         public bool Help;
         public string? Mic, Sample, Out, Expected, GenerateDir;
         public int Block = 128;
-        public float? ThresholdDb, RearmDb, RearmMs, MinIntervalMs, ScanMs, ReleaseMs, HpfHz, Dynamics;
+        public float? ThresholdDb, DetectMs, RearmDb, RearmMs, MinIntervalMs, RetriggerDb, ScanMs, ReleaseMs, HpfHz, LpfHz, MinGainDb;
+        public bool FixedVelocity;
         public double ToleranceMs = 2.0;
         public WavSampleFormat Format = WavSampleFormat.Float32;
 
@@ -213,17 +222,20 @@ public static class Program
         {
             var d = TriggerSettings.Default;
             float thr = ThresholdDb ?? d.ThresholdDb;
-            var s = d with
+            var s = d.WithThreshold(thr) with
             {
-                ThresholdDb = thr,
-                RearmDb = RearmDb ?? Math.Min(d.RearmDb, thr - 10f),
+                DetectTimeMs = DetectMs ?? d.DetectTimeMs,
                 RearmTimeMs = RearmMs ?? d.RearmTimeMs,
                 MinIntervalMs = MinIntervalMs ?? d.MinIntervalMs,
+                RetriggerRiseDb = RetriggerDb ?? d.RetriggerRiseDb,
                 ScanMs = ScanMs ?? d.ScanMs,
                 EnvelopeReleaseMs = ReleaseMs ?? d.EnvelopeReleaseMs,
                 HighPassHz = HpfHz ?? d.HighPassHz,
-                Dynamics = Dynamics ?? d.Dynamics,
+                LowPassHz = LpfHz ?? d.LowPassHz,
+                MinGainDb = MinGainDb ?? d.MinGainDb,
+                FixedVelocity = FixedVelocity,
             };
+            if (RearmDb is { } rearm) s = s with { RearmDb = rearm };
             if (RearmDb is { } r && r > thr)
                 Console.WriteLine($"Aviso: --rearm-db ({r}) acima do limiar ({thr}); usando o limiar.");
             return s.Normalized();
@@ -257,7 +269,11 @@ public static class Program
                     case "--scan-ms": o.ScanMs = F(); break;
                     case "--release-ms": o.ReleaseMs = F(); break;
                     case "--hpf-hz": o.HpfHz = F(); break;
-                    case "--dynamics": o.Dynamics = F(); break;
+                    case "--detect-ms": o.DetectMs = F(); break;
+                    case "--retrigger-db": o.RetriggerDb = F(); break;
+                    case "--lpf-hz": o.LpfHz = F(); break;
+                    case "--min-gain-db": o.MinGainDb = F(); break;
+                    case "--fixed-velocity": o.FixedVelocity = true; break;
                     case "--tolerance-ms": o.ToleranceMs = F(); break;
                     case "--format":
                         o.Format = Next().ToLowerInvariant() switch
