@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>SampleDrum.App</RootNamespace>
+    <AssemblyTitle>SampleDrum</AssemblyTitle>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- NAudio 3.x: the NAudio meta-package no longer includes ASIO; reference it directly. See docs/asio-naudio.md. -->
+    <PackageReference Include="NAudio.Asio" Version="3.3.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SampleDrum.Core\SampleDrum.Core.csproj" />
+  </ItemGroup>
+
+</Project>
