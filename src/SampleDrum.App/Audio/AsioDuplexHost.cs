@@ -21,6 +21,7 @@ public sealed class AsioDuplexHost : IAudioHost
 
     private AsioDevice? _device;
     private bool _stopRequested;
+    private SynchronizationContext? _ownerContext;
 
     // Audio-thread state: allocated in Start(), only read/written by the callback afterwards.
     private float[] _inBuffer = [];
@@ -101,6 +102,8 @@ public sealed class AsioDuplexHost : IAudioHost
         if (IsRunning) return;
         DisposeDevice();
         _stopRequested = false;
+        // Start() runs on the UI thread; device events are funnelled back to it (see OnDeviceStopped).
+        _ownerContext = SynchronizationContext.Current;
 
         var device = OpenDevice(_driverName);
         try
@@ -226,21 +229,43 @@ public sealed class AsioDuplexHost : IAudioHost
         Volatile.Write(ref _callbackCount, _callbackCount + 1);
     }
 
+    // Threading (verified in NAudio.Asio 3.3.0 AsioDevice.DispatchEvent/RaiseStopped): Stopped and DriverResetRequest
+    // are never invoked synchronously on the ASIO driver thread; NAudio Posts them to the SynchronizationContext
+    // captured in AsioDevice.Open, or queues them on the ThreadPool when there is none. We still re-post to the
+    // context captured in Start() so that stopping/disposing the device and raising Faulted always happen on the
+    // owner (UI) thread, regardless of where Open ran, and never inside the buffer-switch callback.
     private void OnDeviceStopped(object? sender, StoppedEventArgs e)
     {
-        if (_stopRequested) return;
+        var device = sender as AsioDevice;
         string reason = e.Exception is null ? "o driver parou" : e.Exception.Message;
-        Faulted?.Invoke($"O áudio ASIO parou inesperadamente: {reason}");
+        RunOnOwner(() =>
+        {
+            if (_stopRequested || device is null || !ReferenceEquals(device, _device)) return;
+            DisposeDevice();
+            Faulted?.Invoke($"O áudio ASIO parou inesperadamente: {reason}");
+        });
     }
 
     private void OnDriverResetRequest(object? sender, EventArgs e)
     {
-        // Someone changed the rate/buffer (e.g. in the ASIO panel). Stop rather than re-negotiate:
-        // the user restarts, and Start() re-checks the 48 kHz requirement.
-        Stop();
-        Faulted?.Invoke(
-            "O driver ASIO pediu reinicialização (taxa ou buffer alterado no painel). O áudio foi parado; " +
-            "clique em \"Iniciar áudio\" para abrir de novo.");
+        var device = sender as AsioDevice;
+        RunOnOwner(() =>
+        {
+            if (_stopRequested || device is null || !ReferenceEquals(device, _device)) return;
+            // Someone changed the rate/buffer (e.g. in the ASIO panel). Stop rather than re-negotiate:
+            // the user restarts, and Start() re-checks the 48 kHz requirement.
+            Stop();
+            Faulted?.Invoke(
+                "O driver ASIO pediu reinicialização (taxa ou buffer alterado no painel). O áudio foi parado; " +
+                "clique em \"Iniciar áudio\" para abrir de novo.");
+        });
+    }
+
+    private void RunOnOwner(Action action)
+    {
+        var ctx = _ownerContext;
+        if (ctx is not null) ctx.Post(_ => action(), null);
+        else ThreadPool.QueueUserWorkItem(_ => action()); // headless: still off the ASIO callback thread
     }
 
     public void Stop()

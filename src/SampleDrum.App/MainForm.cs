@@ -299,7 +299,8 @@ public sealed class MainForm : Form
                 _host = new AsioDuplexHost(driver, inIdx, outIdx, _engine);
             }
             var host = _host;
-            host.Faulted += msg => BeginInvoke(() => OnHostFaulted(host, msg));
+            // Faulted may come from a non-UI thread (simulation thread, ThreadPool): always marshal.
+            host.Faulted += msg => PostToUi(() => OnHostFaulted(host, msg));
             host.Start();
             Log("Áudio iniciado: " + host.Description);
             SaveSettings();
@@ -320,6 +321,13 @@ public sealed class MainForm : Form
         {
             UpdateAudioUi();
         }
+    }
+
+    private void PostToUi(Action action)
+    {
+        if (IsDisposed || !IsHandleCreated) return;
+        try { BeginInvoke(action); }
+        catch (InvalidOperationException) { /* window closing: handle already destroyed */ }
     }
 
     private void OnHostFaulted(IAudioHost host, string message)

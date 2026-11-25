@@ -96,6 +96,22 @@ Este documento registra a versão do NAudio usada pelo `SampleDrum.App`, a API A
 8. Ao receber `DriverResetRequest` (alguém mudou taxa/buffer no painel), o host **para** e
    avisa; ao iniciar de novo, a taxa é verificada outra vez.
 
+### Threads dos eventos (conferido no código da 3.3.0)
+
+- `asioMessage(kAsioResetRequest)` chega numa thread do driver, mas o NAudio **não** chama
+  `DriverResetRequest` nela: `AsioDevice.DispatchEvent` faz `SynchronizationContext.Post` para o
+  contexto capturado em `Open` (ou `ThreadPool.QueueUserWorkItem` se não houver contexto).
+- `Stopped` idem (`RaiseStopped`). Quando o callback lança exceção, o NAudio para o driver via
+  `ThreadPool` (nunca dentro do callback; `Stop()` chamado do callback lança
+  `InvalidOperationException` para evitar deadlock).
+- Mesmo assim o `AsioDuplexHost` captura o `SynchronizationContext` em `Start()` (thread da UI)
+  e repassa os dois eventos para ele antes de parar/descartar o driver e disparar `Faulted`,
+  ignorando eventos de um dispositivo antigo. O `MainForm` sempre trata `Faulted` via
+  `BeginInvoke` (protegido contra janela já fechada), pois a simulação o dispara na thread dela.
+- Caminho do callback sem alocação: `BufferSwitchTimeInfoCallBack` lê o `AsioTime` sem
+  marshalling de strings e usa só structs (`AsioBufferTimingInfo`, `AsioTimeCodeInfo`);
+  `AsioProcessBuffers`, `AsioRawInputBuffer`/`AsioRawOutputBuffer` são `ref struct`.
+
 ## Numeração da mesa × índices da API
 
 A mesa e o X-USB numeram canais a partir de **1**; a API ASIO usa índices a partir de **0**:
