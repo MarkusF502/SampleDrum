@@ -54,7 +54,16 @@ public sealed class OnsetDetector
     /// <summary>True when the detector would accept a new onset (apart from the lockout).</summary>
     public bool IsArmed => _armed;
 
-    internal void SetParams(EngineParams p) => _p = p;
+    /// <summary>
+    /// Applies new parameters, keeping the state. If the envelope is already above the new threshold
+    /// (e.g. the threshold was lowered during a sustain) the detector disarms, so a settings change never
+    /// fires a spurious trigger by itself; it re-arms through the normal hysteresis.
+    /// </summary>
+    internal void SetParams(EngineParams p)
+    {
+        _p = p;
+        if (_armed && _env >= p.ThresholdLin) { _armed = false; _belowCount = 0; }
+    }
 
     /// <summary>Clears all state (envelope, filter, hysteresis, lockout).</summary>
     public void Reset()
