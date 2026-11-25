@@ -64,7 +64,7 @@ public class EngineTests
     [Fact]
     public void Disabling_FadesOutAutomaticVoices_ThenSilence()
     {
-        var engine = new TriggerEngine(Fs, Defaults with { ScanMs = 0f, Dynamics = 0f, StealFadeMs = 1f });
+        var engine = new TriggerEngine(Fs, Impulsive with { StealFadeMs = 1f });
         engine.SetSample(DcSample(Fs));
         var input = new float[128];
         input[10] = 0.5f;
@@ -87,7 +87,7 @@ public class EngineTests
     [Fact]
     public void Enabled_NoSampleLoaded_EventsStillReported_OutputSilent()
     {
-        var engine = new TriggerEngine(Fs, Defaults);
+        var engine = new TriggerEngine(Fs, Impulsive);
         var mic = new float[4800];
         mic[100] = 0.5f;
         var r = OfflineProcessor.Run(engine, mic, 128);
@@ -98,7 +98,7 @@ public class EngineTests
     [Fact]
     public void VoicePool_StealsOldest_WithFade_KeepsMaxVoices()
     {
-        var s = Defaults with { MaxVoices = 2, ScanMs = 0f, Dynamics = 0f, MinIntervalMs = 0f, StealFadeMs = 2f };
+        var s = Impulsive with { MaxVoices = 2, MinIntervalMs = 0f, StealFadeMs = 2f };
         var mic = new float[Fs];
         long[] hits = { 1000, 6000, 11000 };               // impulses, envelope re-arms in between
         foreach (var h in hits) mic[h] = 0.5f;
@@ -119,18 +119,18 @@ public class EngineTests
     [Fact]
     public void UpdateSettings_AppliedAtNextBlock()
     {
-        var engine = new TriggerEngine(Fs, Defaults with { ScanMs = 0f });
+        var engine = new TriggerEngine(Fs, Impulsive);
         var block = new float[128];
         var o = new float[128];
         block[5] = Db.ToLinear(-20f);
 
-        engine.UpdateSettings(Defaults with { ThresholdDb = -10f, ScanMs = 0f });
+        engine.UpdateSettings(Impulsive with { ThresholdDb = -10f });
         engine.Process(block, o);
         Assert.False(engine.TryDequeueEvent(out _));
         Assert.Equal(-10f, engine.Settings.ThresholdDb);
 
         // Lowering the threshold below the current envelope must not fire by itself.
-        engine.UpdateSettings(Defaults with { ThresholdDb = -30f, ScanMs = 0f });
+        engine.UpdateSettings(Impulsive with { ThresholdDb = -30f });
         var silence = new float[Fs / 4];                 // let the envelope decay and re-arm
         engine.Process(silence, new float[silence.Length]);
         Assert.False(engine.TryDequeueEvent(out _));
@@ -142,11 +142,12 @@ public class EngineTests
     [Fact]
     public void Settings_AreNormalized()
     {
-        var s = new TriggerSettings { ThresholdDb = -20f, RearmDb = -10f, MaxVoices = 100, Dynamics = 3f, ScanMs = float.NaN }.Normalized();
+        var s = new TriggerSettings { ThresholdDb = -20f, RearmDb = -10f, MaxVoices = 100, MinGainDb = 3f, ScanMs = float.NaN, DetectTimeMs = -1f }.Normalized();
         Assert.Equal(-20f, s.RearmDb);
         Assert.Equal(16, s.MaxVoices);
-        Assert.Equal(1f, s.Dynamics);
-        Assert.Equal(2f, s.ScanMs);
+        Assert.Equal(0f, s.MinGainDb);
+        Assert.Equal(0f, s.ScanMs);
+        Assert.Equal(0f, s.DetectTimeMs);
     }
 
     [Fact]
@@ -181,7 +182,7 @@ public class EngineTests
     public void Process_DoesNotAllocate()
     {
         var (mic, _) = SyntheticSignals.MicTrack(Fs);
-        var engine = new TriggerEngine(Fs, Defaults with { HighPassHz = 30f });
+        var engine = new TriggerEngine(Fs, Defaults with { LowPassHz = 200f });
         engine.SetSample(SyntheticSignals.KickSample(Fs));
         var output = new float[128];
 
@@ -201,6 +202,57 @@ public class EngineTests
         RunAll();
         long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
         Assert.Equal(0, allocated);
+    }
+
+    /// <summary>Research test #9: a fast sequence beyond MaxVoices steals with a fade (no click) and does not allocate.</summary>
+    [Fact]
+    public void FastSequenceBeyondMaxVoices_NoClick_NoAllocation()
+    {
+        var mic = NoiseFloor(1.5);
+        long[] hits = Enumerable.Range(0, 8).Select(i => Ms(200) + i * Ms(45)).ToArray();
+        int seed = 1;
+        foreach (var h in hits) AddKick(mic, h, -6f, 40f, seed: seed++);
+
+        var s = Defaults with { MaxVoices = 2 };
+        var engine = new TriggerEngine(Fs, s);
+        engine.SetSample(DcSample(Fs * 2)); // longer than the test: voices only end through steal fades
+        var output = new float[mic.Length];
+
+        void RunAll()
+        {
+            for (int start = 0; start + 128 <= mic.Length; start += 128)
+            {
+                var o = output.AsSpan(start, 128);
+                o.Clear();
+                engine.Process(mic.AsSpan(start, 128), o);
+            }
+        }
+
+        var warm = new TriggerEngine(Fs, s);          // JIT warm-up on a separate engine
+        warm.SetSample(DcSample(16));
+        for (int start = 0; start + 128 <= mic.Length; start += 128) warm.Process(mic.AsSpan(start, 128), new float[128]);
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        RunAll();
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        Assert.Equal(0, allocated);
+
+        var events = new List<TriggerEvent>();
+        while (engine.TryDequeueEvent(out var e)) events.Add(e);
+        Assert.Equal(hits.Length, events.Count);
+        Assert.True(engine.ActiveVoiceCount <= 2 * s.MaxVoices);
+
+        // With a DC sample the output is the sum of voice gains: upward steps are voices starting (<= 1),
+        // downward steps may only come from steal fades (gain / 144 samples per step for 3 ms).
+        float maxDown = 0f;
+        int processed = mic.Length / 128 * 128;
+        for (int i = 1; i < processed; i++)
+        {
+            float d = output[i] - output[i - 1];
+            Assert.True(d <= 1.0001f, $"jump +{d} at {i}");
+            maxDown = Math.Max(maxDown, -d);
+        }
+        Assert.True(maxDown < 0.05f, $"abrupt drop {maxDown}");
     }
 
     [Fact]
