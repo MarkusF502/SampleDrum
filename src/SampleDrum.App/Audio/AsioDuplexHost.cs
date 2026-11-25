@@ -45,6 +45,7 @@ public sealed class AsioDuplexHost : IAudioHost
     public bool IsRunning => _device?.State == AsioDeviceState.Running;
     public int FramesPerBuffer { get; private set; }
     public long CallbackCount => Volatile.Read(ref _callbackCount);
+    public int SampleRate { get; private set; } = RequiredSampleRate;
     public int InputLatencySamples { get; private set; }
     public int OutputLatencySamples { get; private set; }
 
@@ -112,6 +113,7 @@ public sealed class AsioDuplexHost : IAudioHost
             _device = device;
             device.Stopped += OnDeviceStopped;
             device.DriverResetRequest += OnDriverResetRequest;
+            device.LatenciesChanged += OnLatenciesChanged;
             try
             {
                 device.Start();
@@ -128,6 +130,7 @@ public sealed class AsioDuplexHost : IAudioHost
             _device = null;
             device.Stopped -= OnDeviceStopped;
             device.DriverResetRequest -= OnDriverResetRequest;
+            device.LatenciesChanged -= OnLatenciesChanged;
             try { device.Dispose(); } catch { /* best effort */ }
             throw;
         }
@@ -190,6 +193,7 @@ public sealed class AsioDuplexHost : IAudioHost
 
         // Allocate the callback buffers once, at start (generous margin in case a driver hands a bigger block).
         FramesPerBuffer = device.FramesPerBuffer;
+        SampleRate = rate;
         int capacity = Math.Max(FramesPerBuffer, caps.BufferMaxSize);
         _inBuffer = new float[capacity];
         _outBuffer = new float[capacity];
@@ -261,6 +265,21 @@ public sealed class AsioDuplexHost : IAudioHost
         });
     }
 
+    private void OnLatenciesChanged(object? sender, EventArgs e)
+    {
+        var device = sender as AsioDevice;
+        RunOnOwner(() =>
+        {
+            if (device is null || !ReferenceEquals(device, _device)) return;
+            try
+            {
+                InputLatencySamples = device.InputLatencySamples;
+                OutputLatencySamples = device.OutputLatencySamples;
+            }
+            catch { /* device going away */ }
+        });
+    }
+
     private void RunOnOwner(Action action)
     {
         var ctx = _ownerContext;
@@ -281,6 +300,7 @@ public sealed class AsioDuplexHost : IAudioHost
         if (device is null) return;
         device.Stopped -= OnDeviceStopped;
         device.DriverResetRequest -= OnDriverResetRequest;
+        device.LatenciesChanged -= OnLatenciesChanged;
         try { if (device.State == AsioDeviceState.Running) device.Stop(); } catch { /* best effort */ }
         try { device.Dispose(); } catch { /* best effort */ }
     }

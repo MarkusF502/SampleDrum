@@ -17,6 +17,7 @@ internal static class SelfTest
         Console.WriteLine("SampleDrum --selftest (sem hardware)");
 
         ok &= CheckConverters();
+        ok &= CheckSettingsMigration();
 
         var engine = new TriggerEngine(rate, TriggerSettings.Default);
         engine.Enabled = false;
@@ -103,6 +104,39 @@ internal static class SelfTest
             }
             ok &= Check(pass, $"conversão float <-> {type} (com saturação)");
         }
+        return ok;
+    }
+
+    private static bool CheckSettingsMigration()
+    {
+        var d = TriggerSettings.Default.Normalized();
+        bool ok = true;
+
+        // v0 file with the old untouched defaults -> new Core defaults.
+        var v0 = AppSettings.Parse(
+            """{"DriverName":null,"UseSimulation":true,"InputDeskChannel":3,"OutputDeskChannel":1,"SamplePath":null,"ThresholdDb":-30,"RearmDb":-40,"MinIntervalMs":50}""",
+            out _);
+        ok &= Check(v0.ToTriggerSettings() == d && v0.InputDeskChannel == 3,
+            "settings.json v0 com padrões antigos -> padrões do Core");
+
+        // v0 file with calibrated values -> values kept, rest from Core defaults.
+        var v0Cal = AppSettings.Parse("""{"ThresholdDb":-18,"RearmDb":-26,"MinIntervalMs":60}""", out _);
+        var t = v0Cal.ToTriggerSettings();
+        ok &= Check(t.ThresholdDb == -18f && t.RearmDb == -26f && t.MinIntervalMs == 60f && t.HighPassHz == d.HighPassHz,
+            "settings.json v0 calibrado mantém limiar/rearme/intervalo");
+
+        // Empty/new file and current-version round trip.
+        ok &= Check(AppSettings.Parse("{}", out _).ToTriggerSettings() == d, "settings.json vazio -> padrões do Core");
+        var cur = new AppSettings();
+        cur.FromTriggerSettings(d with { HighPassHz = 60f, FixedVelocity = true, RetriggerRiseDb = 0f });
+        cur.SettingsVersion = AppSettings.CurrentVersion;
+        var back = AppSettings.Parse(System.Text.Json.JsonSerializer.Serialize(cur), out _).ToTriggerSettings();
+        ok &= Check(back.HighPassHz == 60f && back.FixedVelocity && back.RetriggerRiseDb == 0f,
+            "settings.json atual: ida e volta dos campos avançados");
+        var untouched = new AppSettings();
+        untouched.FromTriggerSettings(d);
+        ok &= Check(untouched.ThresholdDb is null && untouched.HighPassHz is null && untouched.FixedVelocity is null,
+            "valores iguais ao padrão não são gravados (seguem o Core)");
         return ok;
     }
 

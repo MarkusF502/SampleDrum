@@ -14,6 +14,13 @@ public interface IAudioHost : IDisposable
     /// <summary>Frames per block once started (0 before).</summary>
     int FramesPerBuffer { get; }
 
+    /// <summary>Sample rate the host runs at (Hz), valid once started.</summary>
+    int SampleRate { get; }
+
+    /// <summary>Input / output latency reported by the driver, in samples (0 when unknown / simulation).</summary>
+    int InputLatencySamples { get; }
+    int OutputLatencySamples { get; }
+
     /// <summary>Number of audio callbacks processed since start (for status display).</summary>
     long CallbackCount { get; }
 

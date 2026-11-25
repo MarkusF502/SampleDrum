@@ -47,6 +47,9 @@ public sealed class FakeAudioHost : IAudioHost
         $"{DisplayName}: {_sampleRate} Hz, bloco {_blockSize} amostras, bumbo sintético a {60.0 / _kickIntervalSec:0} BPM";
     public bool IsRunning => _running;
     public int FramesPerBuffer => _blockSize;
+    public int SampleRate => _sampleRate;
+    public int InputLatencySamples => 0;
+    public int OutputLatencySamples => 0;
     public long CallbackCount => Interlocked.Read(ref _callbackCount);
     public long KicksGenerated => Interlocked.Read(ref _kicksGenerated);
     /// <summary>Samples of output that were non-silent (|x| > -80 dBFS) since start.</summary>

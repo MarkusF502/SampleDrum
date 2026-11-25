@@ -44,6 +44,31 @@ public sealed class MainForm : Form
     private readonly NumericUpDown _nudThreshold = DbBox(-90, 0);
     private readonly NumericUpDown _nudRearm = DbBox(-120, 0);
     private readonly NumericUpDown _nudInterval = new() { Minimum = 0, Maximum = 5000, Increment = 5, Width = 70 };
+    private readonly Label _lblLatency = Lbl("Buffer/latência: áudio parado");
+
+    // "Avançado" (calibration at the rehearsal), collapsible.
+    private readonly CheckBox _chkAdvanced = new()
+    {
+        Text = "Avançado ▸", Appearance = Appearance.Button, AutoSize = true, Margin = new Padding(3, 6, 3, 3),
+    };
+    private readonly FlowLayoutPanel _pnlAdvanced = new()
+    {
+        FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, Visible = false,
+        Margin = new Padding(0),
+    };
+    private readonly NumericUpDown _nudHighPass = Box(0, 2000, 0, 5m);
+    private readonly NumericUpDown _nudDetect = Box(0, 20, 1, 0.1m);
+    private readonly NumericUpDown _nudRearmTime = Box(0, 1000, 0, 1m);
+    private readonly NumericUpDown _nudRetrigger = Box(0, 48, 1, 0.5m);
+    private readonly NumericUpDown _nudVelRange = Box(1, 120, 1, 1m);
+    private readonly NumericUpDown _nudMinGain = Box(-96, 0, 1, 1m);
+    private readonly CheckBox _chkFixedVelocity = new()
+    {
+        Text = "Velocidade fixa (todo disparo a 0 dB)", AutoSize = true, Margin = new Padding(3, 6, 3, 0),
+    };
+    private readonly Button _btnDefaults = new() { Text = "Restaurar padrões", AutoSize = true };
+    private bool _loadingUi;
+    private string _lastLatencyText = "";
     private readonly TextBox _txtLog = new()
     {
         Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill,
@@ -55,16 +80,11 @@ public sealed class MainForm : Form
     {
         Text = "SampleDrum – reforço de bumbo";
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(760, 600);
-        Size = new Size(820, 720);
+        MinimumSize = new Size(820, 640);
+        Size = new Size(880, 860);
 
-        _settings = AppSettings.Load(out var settingsWarning);
-        _engine = new TriggerEngine(EngineRate, new TriggerSettings
-        {
-            ThresholdDb = _settings.ThresholdDb,
-            RearmDb = _settings.RearmDb,
-            MinIntervalMs = _settings.MinIntervalMs,
-        });
+        _settings = AppSettings.Load(out var settingsNote);
+        _engine = new TriggerEngine(EngineRate, _settings.ToTriggerSettings()); // Core defaults + stored overrides
         _engine.Enabled = false; // always start DISABLED
 
         BuildLayout();
@@ -75,7 +95,7 @@ public sealed class MainForm : Form
 
         Log("SampleDrum iniciado. O disparo automático começa DESATIVADO.");
         Log($"Configurações: {AppSettings.FilePath}");
-        if (settingsWarning is not null) Log("AVISO: " + settingsWarning);
+        if (settingsNote is not null) Log(settingsNote);
         if (!string.IsNullOrEmpty(_settings.SamplePath)) _sampleLoad = LoadSampleAsync(_settings.SamplePath);
         _uiTimer.Start();
     }
@@ -86,6 +106,12 @@ public sealed class MainForm : Form
 
     private static NumericUpDown DbBox(int min, int max) =>
         new() { Minimum = min, Maximum = max, DecimalPlaces = 1, Increment = 0.5m, Width = 70 };
+
+    private static NumericUpDown Box(int min, int max, int decimals, decimal increment) =>
+        new() { Minimum = min, Maximum = max, DecimalPlaces = decimals, Increment = increment, Width = 70 };
+
+    private static void SetNud(NumericUpDown nud, float value) =>
+        nud.Value = Math.Clamp((decimal)MathF.Round(value, nud.DecimalPlaces), nud.Minimum, nud.Maximum);
 
     private static FlowLayoutPanel Row(params Control[] controls)
     {
@@ -117,7 +143,8 @@ public sealed class MainForm : Form
         root.Controls.Add(Group("Áudio",
             Row(Lbl("Driver:"), _cmbDriver, _btnPanel, _btnRefresh),
             Row(Lbl("Entrada USB"), _nudIn, _lblInIdx, Lbl("    Saída USB"), _nudOut, _lblOutIdx),
-            Row(_btnStart, _btnStop, _lblAudio)));
+            Row(_btnStart, _btnStop, _lblAudio),
+            Row(_lblLatency)));
 
         root.Controls.Add(Group("Sample",
             Row(_btnWav, _lblWav),
@@ -127,7 +154,19 @@ public sealed class MainForm : Form
             Row(_btnEnable, _lblEnabled),
             Row(Lbl("Entrada:"), _meter, _led, _lblLevel),
             Row(Lbl("Limiar (dBFS)"), _nudThreshold, Lbl("  Rearme (dBFS)"), _nudRearm,
-                Lbl("  Intervalo mínimo (ms)"), _nudInterval)));
+                Lbl("  Intervalo mínimo (ms)"), _nudInterval),
+            Row(_chkAdvanced),
+            _pnlAdvanced));
+
+        _pnlAdvanced.Controls.AddRange(
+        [
+            Row(Lbl("Passa-altas no detector (Hz, 0 = desligado)"), _nudHighPass,
+                Lbl("  Tempo de detecção (ms)"), _nudDetect),
+            Row(Lbl("Tempo de rearme (ms)"), _nudRearmTime,
+                Lbl("  Redisparo por subida (dB, 0 = desligado)"), _nudRetrigger),
+            Row(Lbl("Faixa de velocidade (dB)"), _nudVelRange, Lbl("  Ganho mínimo (dB)"), _nudMinGain),
+            Row(_chkFixedVelocity, _btnDefaults),
+        ]);
 
         var logBox = new GroupBox { Text = "Status / log", Dock = DockStyle.Fill, Padding = new Padding(6) };
         logBox.Controls.Add(_txtLog);
@@ -141,12 +180,36 @@ public sealed class MainForm : Form
         PopulateDrivers();
         _nudIn.Value = Math.Clamp(_settings.InputDeskChannel, 1, ChannelMap.MaxChannels);
         _nudOut.Value = Math.Clamp(_settings.OutputDeskChannel, 1, ChannelMap.MaxChannels);
-        var s = _engine.Settings; // normalized
-        _nudThreshold.Value = (decimal)s.ThresholdDb;
-        _nudRearm.Value = (decimal)s.RearmDb;
-        _nudInterval.Value = (decimal)Math.Clamp(s.MinIntervalMs, 0f, 5000f);
+        ShowTriggerSettings(_engine.Settings); // normalized
+        _chkAdvanced.Checked = _settings.AdvancedExpanded;
+        UpdateAdvancedUi();
         UpdateChannelLabels();
+    }
+
+    private void ShowTriggerSettings(TriggerSettings s)
+    {
+        _loadingUi = true;
+        try
+        {
+            SetNud(_nudThreshold, s.ThresholdDb);
+            SetNud(_nudRearm, s.RearmDb);
+            SetNud(_nudInterval, s.MinIntervalMs);
+            SetNud(_nudHighPass, s.HighPassHz);
+            SetNud(_nudDetect, s.DetectTimeMs);
+            SetNud(_nudRearmTime, s.RearmTimeMs);
+            SetNud(_nudRetrigger, s.RetriggerRiseDb);
+            SetNud(_nudVelRange, s.VelocityRangeDb);
+            SetNud(_nudMinGain, s.MinGainDb);
+            _chkFixedVelocity.Checked = s.FixedVelocity;
+        }
+        finally { _loadingUi = false; }
         UpdateMeterMarkers();
+    }
+
+    private void UpdateAdvancedUi()
+    {
+        _pnlAdvanced.Visible = _chkAdvanced.Checked;
+        _chkAdvanced.Text = _chkAdvanced.Checked ? "Avançado ▾" : "Avançado ▸";
     }
 
     private void PopulateDrivers()
@@ -178,9 +241,13 @@ public sealed class MainForm : Form
         _btnWav.Click += async (_, _) => await ChooseWavAsync();
         _btnTest.Click += (_, _) => TestSample();
         _btnEnable.Click += (_, _) => { _engine.Enabled = !_engine.Enabled; UpdateEnabledUi(); };
-        _nudThreshold.ValueChanged += (_, _) => ApplyTriggerSettings();
-        _nudRearm.ValueChanged += (_, _) => ApplyTriggerSettings();
-        _nudInterval.ValueChanged += (_, _) => ApplyTriggerSettings();
+        _nudThreshold.ValueChanged += (_, _) => OnThresholdChanged();
+        foreach (var nud in new[] { _nudRearm, _nudInterval, _nudHighPass, _nudDetect, _nudRearmTime, _nudRetrigger,
+                                    _nudVelRange, _nudMinGain })
+            nud.ValueChanged += (_, _) => ApplyTriggerSettings();
+        _chkFixedVelocity.CheckedChanged += (_, _) => ApplyTriggerSettings();
+        _chkAdvanced.CheckedChanged += (_, _) => UpdateAdvancedUi();
+        _btnDefaults.Click += (_, _) => RestoreDefaults();
         _uiTimer.Tick += (_, _) => OnUiTick();
         FormClosing += (_, _) => OnClosing();
     }
@@ -219,16 +286,51 @@ public sealed class MainForm : Form
 
     // ---------- actions ----------
 
+    /// <summary>Moving the threshold moves the re-arm level by the same amount (keeps the hysteresis).</summary>
+    private void OnThresholdChanged()
+    {
+        if (_loadingUi) return;
+        var moved = _engine.Settings.WithThreshold((float)_nudThreshold.Value);
+        _loadingUi = true;
+        try { SetNud(_nudRearm, moved.RearmDb); }
+        finally { _loadingUi = false; }
+        ApplyTriggerSettings();
+    }
+
     private void ApplyTriggerSettings()
     {
-        if (_nudRearm.Value > _nudThreshold.Value) _nudRearm.Value = _nudThreshold.Value; // re-enters once
+        if (_loadingUi) return;
+        if (_nudRearm.Value > _nudThreshold.Value)
+        {
+            _loadingUi = true;
+            try { _nudRearm.Value = _nudThreshold.Value; }
+            finally { _loadingUi = false; }
+        }
         _engine.UpdateSettings(_engine.Settings with
         {
             ThresholdDb = (float)_nudThreshold.Value,
             RearmDb = (float)_nudRearm.Value,
             MinIntervalMs = (float)_nudInterval.Value,
+            HighPassHz = (float)_nudHighPass.Value,
+            DetectTimeMs = (float)_nudDetect.Value,
+            RearmTimeMs = (float)_nudRearmTime.Value,
+            RetriggerRiseDb = (float)_nudRetrigger.Value,
+            VelocityRangeDb = (float)_nudVelRange.Value,
+            MinGainDb = (float)_nudMinGain.Value,
+            FixedVelocity = _chkFixedVelocity.Checked,
         });
         UpdateMeterMarkers();
+    }
+
+    private void RestoreDefaults()
+    {
+        var d = TriggerSettings.Default.Normalized();
+        ShowTriggerSettings(d);
+        _engine.UpdateSettings(d);
+        Log($"Padrões do detector restaurados: limiar {d.ThresholdDb:0.0} dBFS, rearme {d.RearmDb:0.0} dBFS, " +
+            $"intervalo {d.MinIntervalMs:0} ms, passa-altas {d.HighPassHz:0} Hz, detecção {d.DetectTimeMs:0.0} ms, " +
+            $"tempo de rearme {d.RearmTimeMs:0} ms, redisparo {d.RetriggerRiseDb:0.0} dB, faixa {d.VelocityRangeDb:0} dB, " +
+            $"ganho mínimo {d.MinGainDb:0} dB, velocidade {(d.FixedVelocity ? "fixa" : "variável")}.");
     }
 
     private async Task ChooseWavAsync()
@@ -303,6 +405,8 @@ public sealed class MainForm : Form
             host.Faulted += msg => PostToUi(() => OnHostFaulted(host, msg));
             host.Start();
             Log("Áudio iniciado: " + host.Description);
+            UpdateLatencyLabel();
+            Log("Para anotar no ensaio: " + _lblLatency.Text);
             SaveSettings();
         }
         catch (AudioHostException ex)
@@ -396,8 +500,8 @@ public sealed class MainForm : Form
             if (e.IsManualTest)
                 sb.Append($"{Stamp()} Teste manual (t={t:0.000} s, ganho {e.Velocity:0.00})\r\n");
             else
-                sb.Append($"{Stamp()} Disparo #{_eventCount}: t={t:0.000} s, pico {ToDb(e.Peak):0.0} dBFS, " +
-                          $"velocidade {e.Velocity:0.00}\r\n");
+                sb.Append($"{Stamp()} Disparo #{_eventCount}{(e.IsRetrigger ? " (redisparo)" : "")}: t={t:0.000} s, " +
+                          $"pico {ToDb(e.Peak):0.0} dBFS, velocidade {e.Velocity:0.00}, ganho {ToDb(e.Gain):0.0} dB\r\n");
         }
         if (sb is not null) AppendLog(sb.ToString());
 
@@ -409,6 +513,34 @@ public sealed class MainForm : Form
             string extra = _host is FakeAudioHost f ? $", saída {ToDb(f.ReadAndResetOutputPeak()):0} dBFS" : "";
             _lblAudio.Text = $"Rodando: {_host.CallbackCount} blocos de {_host.FramesPerBuffer}, {_eventCount} eventos{extra}";
         }
+        UpdateLatencyLabel();
+    }
+
+    /// <summary>Buffer size and latencies measured/reported by the running host, for the operator to note.</summary>
+    private void UpdateLatencyLabel()
+    {
+        string text;
+        var h = _host;
+        if (h is null || !h.IsRunning)
+            text = "Buffer/latência: áudio parado";
+        else
+        {
+            double rate = h.SampleRate > 0 ? h.SampleRate : EngineRate;
+            double Ms(int samples) => samples * 1000.0 / rate;
+            var s = _engine.Settings;
+            double detectMs = Math.Max(s.DetectTimeMs, s.ScanMs);
+            if (h is FakeAudioHost)
+                text = $"Simulação: bloco {h.FramesPerBuffer} amostras = {Ms(h.FramesPerBuffer):0.00} ms @ {rate:0} Hz " +
+                       $"(sem driver); detecção +{detectMs:0.0} ms";
+            else
+            {
+                int inL = h.InputLatencySamples, outL = h.OutputLatencySamples;
+                text = $"Buffer ASIO {h.FramesPerBuffer} amostras = {Ms(h.FramesPerBuffer):0.00} ms @ {rate:0} Hz | " +
+                       $"latência do driver: entrada {inL} ({Ms(inL):0.0} ms), saída {outL} ({Ms(outL):0.0} ms) | " +
+                       $"PC (entrada+saída+detecção) ≈ {Ms(inL) + Ms(outL) + detectMs:0.0} ms";
+            }
+        }
+        if (text != _lastLatencyText) { _lastLatencyText = text; _lblLatency.Text = text; }
     }
 
     private static float ToDb(float linear) => linear > 1e-6f ? 20f * MathF.Log10(linear) : -120f;
@@ -436,9 +568,8 @@ public sealed class MainForm : Form
         if (!IsSimulationSelected) _settings.DriverName = (string)_cmbDriver.SelectedItem!;
         _settings.InputDeskChannel = (int)_nudIn.Value;
         _settings.OutputDeskChannel = (int)_nudOut.Value;
-        _settings.ThresholdDb = (float)_nudThreshold.Value;
-        _settings.RearmDb = (float)_nudRearm.Value;
-        _settings.MinIntervalMs = (float)_nudInterval.Value;
+        _settings.FromTriggerSettings(_engine.Settings);
+        _settings.AdvancedExpanded = _chkAdvanced.Checked;
         try { _settings.Save(); }
         catch (Exception ex) { Log($"AVISO: não foi possível salvar {AppSettings.FilePath}: {ex.Message}"); }
     }
