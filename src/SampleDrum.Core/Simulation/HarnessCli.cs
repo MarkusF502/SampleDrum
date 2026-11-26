@@ -68,13 +68,17 @@ public static class HarnessCli
                     break;
                 case "--mics4": o = o with { MultichannelMics = Next() }; break;
                 case "--channels":
-                    var ch = Next().Split(',').Select(s => int.Parse(s.Trim(), Inv)).ToArray();
+                    var ch = Next().Split(',').Select(s => Int(a, s.Trim())).ToArray();
                     if (ch.Length != 4) throw new ArgumentException("--channels precisa de 4 números (ex.: 1,2,3,4).");
                     o = o with { Channels = ch };
                     break;
-                case "--block": o = o with { BlockSize = int.Parse(Next(), Inv) }; break;
-                case "--seed": o = o with { Seed = int.Parse(Next(), Inv) }; break;
-                case "--tolerance": o = o with { ToleranceMs = double.Parse(Next(), Inv) }; break;
+                case "--block": o = o with { BlockSize = Int(a, Next()) }; break;
+                case "--seed": o = o with { Seed = Int(a, Next()) }; break;
+                case "--tolerance":
+                    string t = Next();
+                    o = o with { ToleranceMs = double.TryParse(t, NumberStyles.Float, Inv, out var tol) && tol > 0 ? tol
+                        : throw new ArgumentException($"{a}: valor inválido \"{t}\" (use ponto decimal, ex.: 2.5).") };
+                    break;
                 case "--realtime": o = o with { Realtime = true }; break;
                 case "--play": o = o with { Play = true, Realtime = true }; break;
                 default: throw new ArgumentException($"Opção desconhecida: {a}");
@@ -84,6 +88,10 @@ public static class HarnessCli
         if (o.Mics is not null && o.MultichannelMics is not null) throw new ArgumentException("Use --mics ou --mics4, não os dois.");
         return o;
     }
+
+    private static int Int(string option, string value) =>
+        int.TryParse(value, NumberStyles.Integer, Inv, out var v) ? v
+            : throw new ArgumentException($"{option}: valor inválido \"{value}\" (esperado um número inteiro).");
 
     /// <summary>Builds the scenario: synthetic (seeded) or from the user's mics (resampled to 48 kHz).</summary>
     public static KitScenario LoadScenario(HarnessCliOptions o, Action<string> log)
