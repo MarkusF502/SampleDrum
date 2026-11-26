@@ -39,7 +39,7 @@ onset reportado (±2 ms quando o passa-baixas está ligado, por causa do atraso 
 | 3 | Golpe suprimido com sustain longo | não dispara "atrasado" quando a trava termina |
 | 4 | Fronteira de bloco | blocos 1/7/32/61/64/127/128/256/480/512/1000/1024: eventos **e saída idênticos** ao buffer inteiro, golpe detectado 1 vez na amostra certa |
 | 4 | Faixa sintética completa | os 10 golpes casados, para vários tamanhos de bloco |
-| 5 | Velocity | −30/−18/−6 dBFS crescentes; ganho dentro de `[MinGainDb, 0 dB]`; satura em 1 acima de limiar + `VelocityRangeDb`; monotônica em passos finos; `FixedVelocity` → 0 dB; segue o mapeamento em dB do nível real (±0,05) para bumbo com e sem clique, com e sem passa-baixas; bumbo sem clique de 55 Hz: ±0,15 com 2 ms e ±0,05 com 3 ms |
+| 5 | Velocity | −30/−18/−6 dBFS crescentes; ganho dentro de `[MinGainDb, 0 dB]`; satura em 1 acima de limiar + `VelocityRangeDb`; monotônica em passos finos; `FixedVelocity` → 0 dB; segue o mapeamento em dB do nível real (−0,12/+0,05) para bumbo com e sem clique, com e sem passa-baixas; bumbo sem clique de 55 Hz: −0,25 com 2 ms; golpe suave sem clique (−18 dBFS) nunca fica abaixo do nível que disparou; ronco de 5 Hz a −14 dBFS não mexe na velocity (variação < 0,1 entre fases) |
 | 6 | Ressonância e vazamento | ringing de 50 Hz contínuo abaixo do limiar: nada; caixa 20 dB abaixo do bumbo: nada; vazamento **acima** do limiar dispara sem filtro e é rejeitado com `LowPassHz = 150` (bumbos ainda detectados) |
 | 7 | Clique isolado de 1-2 amostras | rejeitado pelo detect time; aceito com `DetectTimeMs = 0`; não atrapalha um golpe real 10 ms depois |
 | 8 | Latência | o sample começa em onset + `max(DetectTimeMs, ScanMs)` (≤ janela + 1 amostra; 2 ms com os padrões); com tudo em 0 começa na amostra do cruzamento, no mesmo bloco |
@@ -107,7 +107,7 @@ Reimplementação própria a partir do comportamento descrito em `docs/research/
 (LSP Trigger, de lsp-plug.in). O LSP é **LGPL-3**: nenhum código dele foi copiado ou traduzido; ele é só
 referência de comportamento. Diferenças principais em relação ao LSP: envelope *peak-hold* em vez de RMS,
 **intervalo mínimo absoluto** e **redisparo por subida** durante o sustain (o LSP não tem nenhum dos dois),
-velocity pelo pico da entrada **sem filtro** na janela e índice de amostra absoluto nos eventos.
+velocity por um caminho próprio (passa-altas suave de 20 Hz) e índice de amostra absoluto nos eventos.
 
 Caminho do sinal (mesmo código ao vivo e offline, amostra por amostra, estado guardado entre blocos):
 
@@ -126,8 +126,8 @@ Máquina de estados `OFF → DETECT → ON → RELEASE → OFF`:
   depois). Senão, vai para DETECT.
 - **DETECT**: janela de `max(DetectTimeMs, ScanMs)` amostras a partir do onset. Depois de `DetectTimeMs`,
   a média quadrática de |y| na janela precisa atingir o limiar (*debounce*); se não atingir, era um pico
-  isolado → volta a OFF sem mexer na trava. No fim da janela dispara, com a velocity do pico da entrada
-  **sem filtro** na janela → ON. Os tamanhos da janela são congelados no cruzamento (uma troca de ajustes no
+  isolado → volta a OFF sem mexer na trava. No fim da janela dispara, com a velocity do pico do caminho de
+  velocity na janela → ON. Os tamanhos da janela são congelados no cruzamento (uma troca de ajustes no
   meio do DETECT não pula o debounce).
 - **ON → RELEASE** quando o envelope cai a `RearmDb`; **RELEASE → ON** se subir de novo;
   **RELEASE → OFF** (rearmado) depois de `RearmTimeMs` abaixo dele.
@@ -153,7 +153,7 @@ ganhoDb  = (1 − velocity) · MinGainDb + OutputGainDb                    (Fixe
 | `RearmTimeMs` | 15 ms | pesquisa; > meio período da fundamental |
 | `MinIntervalMs` | 35 ms | trava absoluta da pesquisa; abaixo das duplas mais rápidas reais com folga |
 | `RetriggerRiseDb` | 9 dB | pesquisa; maior que a ondulação do envelope (~4 dB a 55 Hz, ~5,4 dB a 40 Hz) |
-| `ScanMs` | 2 ms | medido: erro de velocity ≤ 0,1 dB em bumbos com clique ou varredura de pitch; 2 ms de atraso no total. Ver tabela abaixo |
+| `ScanMs` | 2 ms | medido: a partir de 2 ms o erro em bumbos com clique ou varredura de pitch fica no patamar de ≈ −2 dB do filtro de 20 Hz; 2 ms de atraso no total. Ver tabela abaixo |
 | `EnvelopeReleaseMs` | 20 ms | > 1 período de 50 Hz |
 | `HighPassHz` | 40 Hz | tira ronco/vibração de palco sem tocar na fundamental do bumbo |
 | `LowPassHz` | desligado | ligar em 150-250 Hz só se o vazamento de caixa/tons disparar (adiciona ~1 ms de atraso) |
@@ -163,10 +163,18 @@ ganhoDb  = (1 − velocity) · MinGainDb + OutputGainDb                    (Fixe
 
 ### Compromisso latência × velocity (janela de varredura)
 
-O cruzamento do limiar acontece no início do ataque; o pico real do golpe chega depois. A velocity é o pico
-de |x| da **entrada sem filtro** durante `max(DetectTimeMs, ScanMs)` a partir do cruzamento. (Medir depois do
-passa-altas de 40 Hz subestimava até ~7 dB: o filtro encolhe o primeiro meio-ciclo de um bumbo grave, e uma
-janela maior não recupera isso. Os filtros continuam valendo para a **detecção**.)
+O cruzamento do limiar acontece no início do ataque; o pico real do golpe chega depois. A velocity é o pico,
+durante `max(DetectTimeMs, ScanMs)` a partir do cruzamento, de **max(|caminho de velocity|, |caminho de
+detecção|)**:
+
+- **caminho de velocity** = entrada → passa-altas fixo de **20 Hz** (2ª ordem). Tira ronco e DC, que com a
+  entrada crua faziam um ronco de 5 Hz a −14 dBFS variar a velocity de um bumbo de −12 dBFS entre 0,26 e 0,67
+  conforme a fase; com o filtro a variação cai para 0,04. O passa-altas de 40 Hz da detecção não serve aqui:
+  ele encolhe o primeiro meio-ciclo de um bumbo grave em até ~7 dB.
+- o **max** com o caminho de detecção garante que a velocity nunca fica abaixo do nível que disparou (um golpe
+  suave e sem clique a −18 dBFS dava velocity 0,00; agora 0,17 para 0,25 esperado).
+- vazamento de caixa que coincida com os 2 ms da janela ainda entra no caminho de velocity (o passa-baixas
+  opcional vale só para a detecção); é raro e pouco relevante.
 
 Erro do pico medido em relação ao nível real do golpe (dB), limiar −24 dBFS, faixa 24 dB, 48 kHz
 (gerado com `SyntheticSignals`; "com clique" = ruído de baqueta + seno 120→50 Hz; "sem clique" = só o seno,
@@ -174,15 +182,21 @@ começando na fase 0):
 
 | Bumbo (nível) | 0 ms | 1 ms | 2 ms | 3 ms | 5 ms |
 |---|---|---|---|---|---|
-| com clique, 0 / −6 / −12 dBFS | −5,9 | −3,3 | −0,1 | 0,0 | 0,0 |
-| sem clique 120→50 Hz, 0 dBFS | −7,4 | −2,9 | 0,0 | 0,0 | 0,0 |
-| sem clique 120→50 Hz, −12 dBFS | −4,5 | −1,5 | 0,0 | 0,0 | 0,0 |
-| sem clique 55 Hz, 0 dBFS | −12,6 | −7,9 | −3,2 | −0,9 | 0,0 |
-| sem clique 55 Hz, −12 dBFS | −6,9 | −4,4 | −1,5 | −0,2 | 0,0 |
-| sem clique 55 Hz, 0 dBFS, passa-baixas 150 Hz | −4,6 | −2,8 | −0,8 | 0,0 | 0,0 |
+| com clique, 0 / −6 / −12 dBFS | −6,1 | −4,1 | −1,9 | −1,9 | −1,9 |
+| sem clique 120→50 Hz, 0 dBFS | −7,9 | −3,8 | −2,0 | −2,0 | −1,8 |
+| sem clique 120→50 Hz, −12 dBFS | −5,2 | −2,7 | −2,0 | −2,0 | −1,0 |
+| sem clique 55 Hz, 0 dBFS | −13,1 | −8,9 | −5,0 | −3,9 | −3,8 |
+| sem clique 55 Hz, −12 dBFS | −7,9 | −5,9 | −4,0 | −3,8 | −3,8 |
+| sem clique 55 Hz, −18 dBFS | −4,6 | −3,5 | −2,0 | −0,4 | +0,2 |
+| sem clique 55 Hz, 0 dBFS, passa-baixas 150 Hz | −6,0 | −4,8 | −3,8 | −3,8 | −3,8 |
 
-(1 dB de erro ≈ 0,04 de velocity com faixa de 24 dB.) Por isso o padrão é **2 ms**: bumbos com ataque de
-baqueta ou varredura de pitch ficam dentro de 0,1 dB; para um bumbo muito grave e sem ataque, use 3 ms.
+(1 dB de erro ≈ 0,04 de velocity com faixa de 24 dB.) A partir de 2 ms o erro de bumbos com clique ou
+varredura de pitch para num patamar de ≈ −2 dB, que é o custo do filtro de 20 Hz no primeiro meio-ciclo: é
+**constante**, então a velocity continua proporcional e a calibração de `VelocityRangeDb` pelo pico medido o
+absorve. Por isso o padrão é **2 ms**; janelas maiores só ajudam bumbos muito graves e sem ataque (55 Hz:
+−5,0 → −3,9 dB com 3 ms). Comparado no mesmo teste: passa-altas de 1ª ordem (10-20 Hz) deixava o ronco variar
+a velocity em 0,16-0,19 e 2ª ordem em 15 Hz em 0,07, com patamar de −1,5 dB; ficou 2ª ordem em 20 Hz
+(variação 0,04, patamar −2 dB), que rejeita melhor o ronco de palco de 10-20 Hz.
 A janela aparece no app em **Avançado → Janela de velocidade (ms)**, com o atraso resultante ao lado.
 
 - `ScanMs = 0`: só os 0,5 ms do detect time (menor latência), mas a velocity lê 6-13 dB abaixo.

@@ -3,8 +3,9 @@ namespace SampleDrum.Core;
 /// <summary>Result of one detected onset.</summary>
 /// <param name="OnsetIndex">Absolute sample index of the threshold crossing.</param>
 /// <param name="FireIndex">Absolute sample index where the trigger fires (= onset + max(detect, scan) window).</param>
-/// <param name="Peak">Linear peak of the raw (unfiltered) |input| over the window. The filters only drive detection:
-/// a 40 Hz high-pass shrinks the first half-cycle of a low kick by several dB, which would understate velocity.</param>
+/// <param name="Peak">Linear peak over the window of max(|velocity path|, |detector path|). The velocity path is the input
+/// through a gentle fixed 20 Hz high-pass (the detector's 40 Hz high-pass shrinks the first half-cycle of a low kick
+/// by several dB; 20 Hz still removes rumble). Taking the max keeps velocity at or above the level that triggered.</param>
 /// <param name="Velocity">0..1, see <see cref="TriggerSettings.VelocityRangeDb"/>.</param>
 /// <param name="IsRetrigger">True when the onset was accepted during the previous hit's sustain (rise re-trigger).</param>
 public readonly record struct DetectedOnset(long OnsetIndex, long FireIndex, float Peak, float Velocity, bool IsRetrigger);
@@ -43,7 +44,7 @@ public enum DetectorState
 /// so that hit's sustain cannot fire later.</item>
 /// <item>DETECT: collects max(DetectTime, Scan) samples starting at the crossing. After DetectTime samples the
 /// mean square of |y| must reach the threshold (debounce); otherwise it was an isolated spike → back to OFF
-/// (or ON if it started on a sustain). At the end of the window the trigger fires with the peak of the raw input
+/// (or ON if it started on a sustain). At the end of the window the trigger fires with the peak of the velocity path
 /// → ON.</item>
 /// <item>ON → RELEASE when the envelope falls to the release level; RELEASE → ON if it rises again;
 /// RELEASE → OFF (re-armed) after ReleaseTime below it.</item>
@@ -66,7 +67,8 @@ public sealed class OnsetDetector
     private int _windowCount;
     private double _sumSq;
     private float _peak;
-    private float _rawAbs;   // |x| of the current sample before the detector filters (velocity source)
+    private float _velAbs;   // velocity-path level of the current sample (see Step)
+    private double _vpZ1, _vpZ2;
     private bool _debounced;
     private bool _fromSustain;
     private int _releaseCount;
@@ -76,7 +78,11 @@ public sealed class OnsetDetector
     // can neither skip the debounce nor cut the window short.
     private int _winDetect, _winTotal;
 
-    /// <summary>Filter states below this magnitude are flushed to exactly 0 (avoids subnormal slowdowns in silence).</summary>
+    /// <summary>
+    /// A filter's two states are flushed to exactly 0 together once both are below this magnitude (avoids subnormal
+    /// slowdowns in silence). Flushing them one at a time would inject tiny errors that the high internal gain of a
+    /// low-cutoff high-pass near DC (1/(1+a1+a2), ~146000 at 20 Hz) keeps alive around 1e-23 instead of decaying.
+    /// </summary>
     private const double DenormalFlush = 1e-25;
 
     public OnsetDetector(int sampleRate, TriggerSettings settings)
@@ -91,7 +97,7 @@ public sealed class OnsetDetector
     public DetectorState State => _state;
 
     /// <summary>True when all filter states are exactly zero (diagnostics/tests).</summary>
-    internal bool FilterStateIsZero => _hpZ1 == 0 && _hpZ2 == 0 && _lpZ1 == 0 && _lpZ2 == 0;
+    internal bool FilterStateIsZero => _hpZ1 == 0 && _hpZ2 == 0 && _lpZ1 == 0 && _lpZ2 == 0 && _vpZ1 == 0 && _vpZ2 == 0;
 
     /// <summary>True when the detector is OFF, i.e. armed for a normal crossing.</summary>
     public bool IsArmed => _state == DetectorState.Off;
@@ -110,10 +116,10 @@ public sealed class OnsetDetector
     /// <summary>Clears all state (filters, envelope, state machine, lockout).</summary>
     public void Reset()
     {
-        _hpZ1 = _hpZ2 = _lpZ1 = _lpZ2 = 0;
+        _hpZ1 = _hpZ2 = _lpZ1 = _lpZ2 = _vpZ1 = _vpZ2 = 0;
         _env = 0f;
         _state = DetectorState.Off;
-        _windowCount = 0; _sumSq = 0; _peak = 0f; _rawAbs = 0f; _debounced = false; _fromSustain = false;
+        _windowCount = 0; _sumSq = 0; _peak = 0f; _velAbs = 0f; _debounced = false; _fromSustain = false;
         _winDetect = _winTotal = 0;
         _releaseCount = 0; _envMin = 0f;
         _lastOnset = long.MinValue / 4;
@@ -128,17 +134,28 @@ public sealed class OnsetDetector
         var p = _p;
         onset = default;
 
-        _rawAbs = Math.Abs(x);
-        if (!float.IsFinite(_rawAbs)) _rawAbs = 0f;
         double y = x;
+        if (!double.IsFinite(y)) y = 0;
+
+        // Velocity path: input -> fixed 20 Hz high-pass (rumble/DC out, the kick's attack nearly untouched).
+        double v = y;
+        if (p.VelocityHighPass.Enabled)
+        {
+            ref readonly var c = ref p.VelocityHighPass;
+            double o = c.B0 * v + _vpZ1;
+            _vpZ1 = c.B1 * v - c.A1 * o + _vpZ2;
+            _vpZ2 = c.B2 * v - c.A2 * o;
+            if (Math.Abs(_vpZ1) < DenormalFlush && Math.Abs(_vpZ2) < DenormalFlush) _vpZ1 = _vpZ2 = 0;
+            v = o;
+        }
+
         if (p.HighPass.Enabled)
         {
             ref readonly var c = ref p.HighPass;
             double o = c.B0 * y + _hpZ1;
             _hpZ1 = c.B1 * y - c.A1 * o + _hpZ2;
             _hpZ2 = c.B2 * y - c.A2 * o;
-            if (Math.Abs(_hpZ1) < DenormalFlush) _hpZ1 = 0;
-            if (Math.Abs(_hpZ2) < DenormalFlush) _hpZ2 = 0;
+            if (Math.Abs(_hpZ1) < DenormalFlush && Math.Abs(_hpZ2) < DenormalFlush) _hpZ1 = _hpZ2 = 0;
             y = o;
         }
         if (p.LowPass.Enabled)
@@ -147,13 +164,16 @@ public sealed class OnsetDetector
             double o = c.B0 * y + _lpZ1;
             _lpZ1 = c.B1 * y - c.A1 * o + _lpZ2;
             _lpZ2 = c.B2 * y - c.A2 * o;
-            if (Math.Abs(_lpZ1) < DenormalFlush) _lpZ1 = 0;
-            if (Math.Abs(_lpZ2) < DenormalFlush) _lpZ2 = 0;
+            if (Math.Abs(_lpZ1) < DenormalFlush && Math.Abs(_lpZ2) < DenormalFlush) _lpZ1 = _lpZ2 = 0;
             y = o;
         }
 
         float a = (float)Math.Abs(y);
         if (!float.IsFinite(a)) { a = 0f; _hpZ1 = _hpZ2 = _lpZ1 = _lpZ2 = 0; }
+        // Velocity level = max(velocity path, detector path): never below the level that triggered.
+        float va = (float)Math.Abs(v);
+        if (!float.IsFinite(va)) { va = 0f; _vpZ1 = _vpZ2 = 0; }
+        _velAbs = va > a ? va : a;
         float env = _env * p.EnvelopeReleaseCoef;
         if (a > env) env = a;
         if (env < 1e-30f) env = 0f; // flush denormals
@@ -207,7 +227,7 @@ public sealed class OnsetDetector
 
         _onset = index;
         _fromSustain = fromSustain;
-        _peak = _rawAbs;
+        _peak = _velAbs;
         _windowCount = 1;
         _sumSq = (double)a * a;
         _winDetect = p.DetectSamples;
@@ -247,7 +267,7 @@ public sealed class OnsetDetector
         }
 
         if (_windowCount < _winDetect) _sumSq += (double)a * a;
-        if (_rawAbs > _peak) _peak = _rawAbs;
+        if (_velAbs > _peak) _peak = _velAbs;
         _windowCount++;
         return false;
     }

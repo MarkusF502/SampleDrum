@@ -55,6 +55,9 @@ internal sealed class EngineParams
     public readonly int StealFadeSamples;
     public readonly BiquadCoefs HighPass;
     public readonly BiquadCoefs LowPass;
+    /// <summary>Gentle fixed high-pass on the velocity path (removes rumble/DC, keeps the kick's first half-cycle).</summary>
+    public readonly BiquadCoefs VelocityHighPass;
+    public const double VelocityHighPassHz = 20.0;
 
     public EngineParams(int sampleRate, TriggerSettings settings)
     {
@@ -80,6 +83,7 @@ internal sealed class EngineParams
         StealFadeSamples = MsToSamples(s.StealFadeMs, fs);
         HighPass = BiquadCoefs.HighPass(s.HighPassHz, fs);
         LowPass = BiquadCoefs.LowPass(s.LowPassHz, fs);
+        VelocityHighPass = BiquadCoefs.HighPass(VelocityHighPassHz, fs);
     }
 
     /// <summary>Velocity 0..1 from a linear detector peak (linear in dB above the threshold).</summary>

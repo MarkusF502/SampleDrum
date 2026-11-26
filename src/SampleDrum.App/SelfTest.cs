@@ -40,6 +40,11 @@ internal static class SelfTest
         engine.RequestTest();
         Thread.Sleep(TimeSpan.FromSeconds(enabledSeconds / 2));
         host.Stop();
+        // Stop() must only return after the simulation thread exited (MainForm calls engine.Reset() right after).
+        long callbacksAtStop = host.CallbackCount;
+        Thread.Sleep(50);
+        bool stoppedCleanly = host.CallbackCount == callbacksAtStop;
+        engine.Reset();
         var (autoEnabled, manualEnabled) = Drain(engine);
         long kicksPhase2 = host.KicksGenerated - kicksPhase1;
 
@@ -54,6 +59,7 @@ internal static class SelfTest
         Console.WriteLine($"Amostras de saída não silenciosas: {host.OutputActiveSamples}");
 
         ok &= Check(fault is null, $"sem falha do host{(fault is null ? "" : ": " + fault)}");
+        ok &= Check(stoppedCleanly, "Stop() espera a thread da simulação terminar (Reset seguro em seguida)");
         ok &= Check(blocks > expectedBlocks * 0.8 && blocks < expectedBlocks * 1.2, "contagem de blocos em tempo real (±20%)");
         ok &= Check(autoDisabled == 0, "nenhum disparo automático com o disparo DESATIVADO");
         ok &= Check(autoEnabled >= 1 && autoEnabled <= kicksPhase2 + 1, "disparos automáticos com o disparo ATIVADO");

@@ -31,9 +31,10 @@ public class ReviewFixTests
     }
 
     /// <summary>
-    /// With the default 2 ms window, velocity follows the dB mapping of the hit's real level within ±0.05
-    /// (±1.2 dB) for kicks with a beater click and for click-less kicks with a pitch sweep, with or without the
-    /// low-pass. (Before the fix, a click-less kick at 0 dBFS read velocity ~0.43.)
+    /// With the default 2 ms window, velocity follows the dB mapping of the hit's real level within -0.12/+0.05
+    /// for kicks with a beater click and for click-less kicks with a pitch sweep, with or without the low-pass.
+    /// The velocity path's 20 Hz high-pass costs a consistent ~2 dB (~-0.08); calibrating VelocityRangeDb absorbs
+    /// it. (Before the fix, a click-less kick at 0 dBFS read velocity ~0.43.)
     /// </summary>
     [Theory]
     [MemberData(nameof(VelocityCases))]
@@ -45,7 +46,7 @@ public class ReviewFixTests
             ? SyntheticSignals.Kick(Fs, peak, 150f, seed: 11)
             : SyntheticSignals.CleanKick(Fs, peak, 150f, startHz: 120f, endHz: 50f);
         var e = SingleHit(hit, s);
-        Assert.InRange(e.Velocity, ExpectedVelocity(levelDb, s) - 0.05f, ExpectedVelocity(levelDb, s) + 0.05f);
+        Assert.InRange(e.Velocity, ExpectedVelocity(levelDb, s) - 0.12f, ExpectedVelocity(levelDb, s) + 0.05f);
     }
 
     [Theory]
@@ -56,14 +57,44 @@ public class ReviewFixTests
     [InlineData(-6f, 150f)]
     public void Velocity_CleanLow55HzKick_WithinToleranceForWindow(float levelDb, float lowPassHz)
     {
-        // Slowest attack possible (55 Hz sine from phase 0, peak at ~4.5 ms): 2 ms reads at most ~3.2 dB low,
-        // 3 ms within ~1 dB (measured; see docs/README-dev.md).
+        // Slowest attack possible (55 Hz sine from phase 0, peak at ~4.5 ms): 2 ms reads at most ~5 dB low,
+        // 3 ms at most ~4 dB (measured; see docs/README-dev.md).
         var hit = SyntheticSignals.CleanKick(Fs, Db.ToLinear(levelDb), 150f);
         var s2 = Defaults with { LowPassHz = lowPassHz };
         var s3 = s2 with { ScanMs = 3f };
         float exp = ExpectedVelocity(levelDb, s2);
-        Assert.InRange(SingleHit(hit, s2).Velocity, exp - 0.15f, exp + 0.02f);
-        Assert.InRange(SingleHit(hit, s3).Velocity, exp - 0.05f, exp + 0.02f);
+        Assert.InRange(SingleHit(hit, s2).Velocity, exp - 0.25f, exp + 0.02f);
+        Assert.InRange(SingleHit(hit, s3).Velocity, exp - 0.20f, exp + 0.02f);
+    }
+
+    [Fact]
+    public void Velocity_SoftCleanKick_NeverBelowTheLevelThatTriggered()
+    {
+        // Probe (a): a soft click-less 55 Hz hit at -18 dBFS (true velocity 0.25). The velocity path alone peaks
+        // below the threshold inside the window; max(velocity path, detector path) keeps it above 0.
+        var e = SingleHit(SyntheticSignals.CleanKick(Fs, Db.ToLinear(-18f), 150f), Defaults);
+        Assert.InRange(e.Velocity, 0.25f - 0.10f, 0.25f + 0.05f);
+        Assert.True(Db.FromLinear(e.Peak) >= Defaults.ThresholdDb);
+    }
+
+    [Fact]
+    public void Velocity_SubsonicRumble_DoesNotModulateVelocity()
+    {
+        // Probe (b): a -12 dBFS kick on top of a -14 dBFS 5 Hz rumble at 8 different phases.
+        // Raw-input velocity swung 0.26..0.67; with the 20 Hz velocity high-pass the spread stays < 0.1.
+        var vels = new List<float>();
+        for (int ph = 0; ph < 8; ph++)
+        {
+            var mic = new float[Fs];
+            double phase = ph * Math.PI / 4;
+            for (int i = 0; i < mic.Length; i++) mic[i] = Db.ToLinear(-14f) * (float)Math.Sin(2 * Math.PI * 5 * i / Fs + phase);
+            long hit = 24000;
+            SyntheticSignals.Add(mic, SyntheticSignals.Kick(Fs, Db.ToLinear(-12f), 150f, 11), hit);
+            var r = Run(mic, Defaults);
+            vels.Add(Assert.Single(r.Events, e => Math.Abs(e.SampleIndex - hit) <= ToleranceSamples).Velocity);
+        }
+        Assert.True(vels.Max() - vels.Min() < 0.1f, string.Join(", ", vels));
+        Assert.InRange(vels.Average(), ExpectedVelocity(-12f, Defaults) - 0.12f, ExpectedVelocity(-12f, Defaults) + 0.05f);
     }
 
     [Fact]

@@ -70,6 +70,7 @@ public sealed class MainForm : Form
     };
     private readonly Button _btnDefaults = new() { Text = "Restaurar padrões", AutoSize = true };
     private bool _loadingUi;
+    private bool _hostStopFailed; // last host Dispose threw: its audio thread may still be running
     private string _lastLatencyText = "";
     private readonly TextBox _txtLog = new()
     {
@@ -403,10 +404,18 @@ public sealed class MainForm : Form
             if (_sampleLoad is not null) await _sampleLoad; // the sample is ready BEFORE audio starts
             if (!_sampleLoaded) Log("AVISO: nenhum sample carregado; o retorno ficará em silêncio.");
 
-            _host?.Dispose();
-            // A previous run may have been stopped mid-voice/mid-detection: start from a clean engine state
-            // (no audio thread is running at this point).
-            _engine.Reset();
+            DisposeHost();
+            // A previous run may have been stopped mid-voice/mid-detection: start from a clean engine state.
+            // Only safe when the previous host really stopped (no audio thread can be inside Process).
+            if (_hostStopFailed)
+            {
+                _hostStopFailed = false;
+                Log("AVISO: o áudio anterior não fechou corretamente; o estado do disparo não foi limpo.");
+            }
+            else
+            {
+                _engine.Reset();
+            }
             if (IsSimulationSelected)
             {
                 _host = new FakeAudioHost(_engine, EngineRate);
@@ -474,7 +483,12 @@ public sealed class MainForm : Form
     {
         var h = _host;
         _host = null;
-        try { h?.Dispose(); } catch (Exception ex) { Log($"AVISO ao fechar o áudio: {ex.Message}"); }
+        try { h?.Dispose(); }
+        catch (Exception ex)
+        {
+            _hostStopFailed = true;
+            Log($"AVISO ao fechar o áudio: {ex.Message}");
+        }
     }
 
     private void TestSample()

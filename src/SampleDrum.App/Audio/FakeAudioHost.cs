@@ -69,12 +69,17 @@ public sealed class FakeAudioHost : IAudioHost
         _thread.Start();
     }
 
+    /// <summary>
+    /// Stops and waits until the simulation thread has really exited, so the caller may touch the processor
+    /// (e.g. <see cref="TriggerEngine.Reset"/>) right after. The loop re-checks <c>_running</c> after every block,
+    /// so this returns within about one block. Faulted is only posted (never blocks on the UI), so no deadlock.
+    /// </summary>
     public void Stop()
     {
         _running = false;
         var t = _thread;
         _thread = null;
-        if (t is not null && t != Thread.CurrentThread) t.Join(1000);
+        if (t is not null && t != Thread.CurrentThread) t.Join();
     }
 
     public void Dispose() => Stop();

@@ -41,10 +41,11 @@ public sealed record TriggerSettings
     public float RetriggerRiseDb { get; init; } = 9f;
 
     /// <summary>
-    /// Velocity scan window (ms) after the crossing. The peak of the raw (unfiltered) input is measured over
-    /// max(DetectTimeMs, ScanMs) samples and the trigger fires at the end of that window, so this is latency.
-    /// Default 2 ms: measured velocity error &lt;= 0.1 dB for kicks with a beater click or pitch sweep and
-    /// ~3 dB for a click-less 55 Hz sine (use 3 ms for very soft attacks). 0 = only the debounce window.
+    /// Velocity scan window (ms) after the crossing. The peak of max(velocity path, detector path) is measured
+    /// over max(DetectTimeMs, ScanMs) samples (velocity path = input through a fixed 20 Hz high-pass) and the
+    /// trigger fires at the end of that window, so this is latency. Default 2 ms: from there on, kicks with a
+    /// beater click or pitch sweep read a constant ~2 dB low (absorbed by calibrating VelocityRangeDb); a
+    /// click-less 55 Hz sine reads ~5 dB low (~4 dB with 3 ms). 0 = only the debounce window.
     /// </summary>
     public float ScanMs { get; init; } = 2f;
 
