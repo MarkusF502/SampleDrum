@@ -15,6 +15,9 @@ public static class Program
     public static int Main(string[] args)
     {
         Console.OutputEncoding = Encoding.UTF8;
+        // v2: 4-piece scenario runner (synthetic kit or 4 mic WAVs) through KitEngine. See docs/harness.md.
+        if (args.Length > 0 && args[0] == "--kit")
+            return SampleDrum.Core.Simulation.HarnessCli.Run(args[1..], "SampleDrum.Offline --kit");
         try
         {
             var opt = Options.Parse(args);
@@ -197,6 +200,8 @@ public static class Program
             Uso:
               SampleDrum.Offline --mic mic.wav [--sample kick.wav] [--out triggers.wav] [opções]
               SampleDrum.Offline --generate-synthetic <pasta>
+              SampleDrum.Offline --kit <pasta> [--mics a b c d | --mics4 f.wav] [--block N] [--seed S]
+                                     cenário de 4 peças pelo KitEngine (veja --kit --help e docs/harness.md)
 
             Opções:
               --block N              tamanho do bloco em amostras (padrão 128)

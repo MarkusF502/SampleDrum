@@ -1,100 +1,41 @@
+using System.Diagnostics;
 using NAudio.Wave.Asio;
 using SampleDrum.App.Audio;
-using SampleDrum.Core;
+using SampleDrum.App.Harness;
+using SampleDrum.Core.Simulation;
 
 namespace SampleDrum.App;
 
 /// <summary>
-/// Headless smoke test (no hardware): FakeAudioHost + TriggerEngine in real time, plus a round-trip check of the
-/// native ASIO sample converters. Exit 0 = pass.
+/// Headless smoke test (no ASIO, no X32): native ASIO sample converters, the shared harness checks (same code as
+/// tests/SampleDrum.Core.Tests/HarnessTests.cs) and the real-time simulation-host checks. Exit 0 = everything passed.
 /// </summary>
 internal static class SelfTest
 {
-    public static int Run(double enabledSeconds)
+    public static int Run()
     {
-        const int rate = 48000;
-        bool ok = true;
-        Console.WriteLine("SampleDrum --selftest (sem hardware)");
+        var sw = Stopwatch.StartNew();
+        Console.WriteLine("SampleDrum --selftest (sem ASIO, sem mesa)");
+        var results = new List<CheckResult>();
+        results.Add(HarnessChecks.Safe("Conversão float <-> formatos nativos ASIO (Int32/Float32/Int16/Int24 LSB, com saturação)", CheckConverters));
+        results.AddRange(HarnessChecks.RunAll(Path.GetTempPath()));
+        results.AddRange(RealtimeChecks.RunAll(speed: 4.0));
 
-        ok &= CheckConverters();
-        ok &= CheckSettingsMigration();
-
-        var engine = new TriggerEngine(rate, TriggerSettings.Default);
-        engine.Enabled = false;
-        engine.SetSample(SyntheticSample(rate));
-
-        using var host = new FakeAudioHost(engine, rate);
-        string? fault = null;
-        host.Faulted += m => fault = m;
-        host.Start();
-        Console.WriteLine($"Host: {host.Description}");
-
-        // Phase 1: disabled -> no automatic events expected.
-        Thread.Sleep(1000);
-        var (autoDisabled, manualDisabled) = Drain(engine);
-        long kicksPhase1 = host.KicksGenerated;
-
-        // Phase 2: enabled, plus one manual test in the middle.
-        engine.Enabled = true;
-        Thread.Sleep(TimeSpan.FromSeconds(enabledSeconds / 2));
-        engine.RequestTest();
-        Thread.Sleep(TimeSpan.FromSeconds(enabledSeconds / 2));
-        host.Stop();
-        // Stop() must only return after the simulation thread exited (MainForm calls engine.Reset() right after).
-        long callbacksAtStop = host.CallbackCount;
-        Thread.Sleep(50);
-        bool stoppedCleanly = host.CallbackCount == callbacksAtStop;
-        engine.Reset();
-        var (autoEnabled, manualEnabled) = Drain(engine);
-        long kicksPhase2 = host.KicksGenerated - kicksPhase1;
-
-        double totalSec = 1.0 + enabledSeconds;
-        long expectedBlocks = (long)(totalSec * rate / host.FramesPerBuffer);
-        long blocks = host.CallbackCount;
-
-        Console.WriteLine($"Blocos processados: {blocks} (esperado ~{expectedBlocks})");
-        Console.WriteLine($"Fase desativada: {kicksPhase1} bumbos sintéticos, {autoDisabled} eventos automáticos, {manualDisabled} testes");
-        Console.WriteLine($"Fase ativada: {kicksPhase2} bumbos sintéticos, {autoEnabled} eventos automáticos, {manualEnabled} testes");
-        Console.WriteLine($"Eventos totais: {autoDisabled + manualDisabled + autoEnabled + manualEnabled}");
-        Console.WriteLine($"Amostras de saída não silenciosas: {host.OutputActiveSamples}");
-
-        ok &= Check(fault is null, $"sem falha do host{(fault is null ? "" : ": " + fault)}");
-        ok &= Check(stoppedCleanly, "Stop() espera a thread da simulação terminar (Reset seguro em seguida)");
-        ok &= Check(blocks > expectedBlocks * 0.8 && blocks < expectedBlocks * 1.2, "contagem de blocos em tempo real (±20%)");
-        ok &= Check(autoDisabled == 0, "nenhum disparo automático com o disparo DESATIVADO");
-        ok &= Check(autoEnabled >= 1 && autoEnabled <= kicksPhase2 + 1, "disparos automáticos com o disparo ATIVADO");
-        ok &= Check(manualEnabled == 1, "\"Testar sample\" gera exatamente 1 evento");
-        ok &= Check(host.OutputActiveSamples > 0, "saída com áudio do sample");
-
-        Console.WriteLine(ok ? "RESULTADO: OK" : "RESULTADO: FALHOU");
-        return ok ? 0 : 1;
-    }
-
-    private static (int auto, int manual) Drain(TriggerEngine engine)
-    {
-        int auto = 0, manual = 0;
-        while (engine.TryDequeueEvent(out var e))
+        foreach (var r in results)
         {
-            if (e.IsManualTest) manual++; else auto++;
+            Console.WriteLine($"  [{(r.Passed ? "OK" : "FALHA")}] {r.Name}");
+            Console.WriteLine($"         {r.Detail}");
         }
-        return (auto, manual);
+        int failed = results.Count(r => !r.Passed);
+        Console.WriteLine($"{results.Count - failed}/{results.Count} verificações OK em {sw.Elapsed.TotalSeconds:0.0} s");
+        Console.WriteLine(failed == 0 ? "RESULTADO: OK" : "RESULTADO: FALHOU");
+        return failed == 0 ? 0 : 1;
     }
 
-    private static float[] SyntheticSample(int rate)
+    private static (bool, string) CheckConverters()
     {
-        var s = new float[rate / 5];
-        for (int i = 0; i < s.Length; i++)
-        {
-            float t = i / (float)rate;
-            s[i] = 0.8f * MathF.Sin(2f * MathF.PI * 60f * t) * MathF.Exp(-t / 0.05f);
-        }
-        return s;
-    }
-
-    private static bool CheckConverters()
-    {
-        bool ok = true;
         float[] src = [0f, 0.5f, -0.5f, 0.999f, -1f, 1.5f, -1.5f, 0.123456f];
+        var bad = new List<string>();
         foreach (var type in new[] { AsioSampleType.Int32LSB, AsioSampleType.Float32LSB, AsioSampleType.Int16LSB, AsioSampleType.Int24LSB })
         {
             var bytes = new byte[src.Length * NativeSampleConverter.BytesPerSample(type)];
@@ -102,62 +43,9 @@ internal static class SelfTest
             NativeSampleConverter.FromFloat(src, type, bytes);
             NativeSampleConverter.ToFloat(bytes, type, back);
             float tol = type == AsioSampleType.Int16LSB ? 1e-4f : 1e-6f;
-            bool pass = true;
             for (int i = 0; i < src.Length; i++)
-            {
-                float expected = Math.Clamp(src[i], -1f, 1f);
-                if (MathF.Abs(back[i] - expected) > tol) pass = false;
-            }
-            ok &= Check(pass, $"conversão float <-> {type} (com saturação)");
-
-            // NaN must become silence and ±Inf full scale, never NaN/garbage on the driver output.
-            float[] bad = [float.NaN, float.PositiveInfinity, float.NegativeInfinity];
-            var badBytes = new byte[bad.Length * NativeSampleConverter.BytesPerSample(type)];
-            var badBack = new float[bad.Length];
-            NativeSampleConverter.FromFloat(bad, type, badBytes);
-            NativeSampleConverter.ToFloat(badBytes, type, badBack);
-            bool nanOk = badBack[0] == 0f && badBack[1] > 0.99f && badBack[2] < -0.99f;
-            ok &= Check(nanOk, $"NaN/infinito -> {type} seguro (NaN = 0, ±inf = fundo de escala)");
+                if (MathF.Abs(back[i] - Math.Clamp(src[i], -1f, 1f)) > tol) { bad.Add(type.ToString()); break; }
         }
-        return ok;
-    }
-
-    private static bool CheckSettingsMigration()
-    {
-        var d = TriggerSettings.Default.Normalized();
-        bool ok = true;
-
-        // v0 file with the old untouched defaults -> new Core defaults.
-        var v0 = AppSettings.Parse(
-            """{"DriverName":null,"UseSimulation":true,"InputDeskChannel":3,"OutputDeskChannel":1,"SamplePath":null,"ThresholdDb":-30,"RearmDb":-40,"MinIntervalMs":50}""",
-            out _);
-        ok &= Check(v0.ToTriggerSettings() == d && v0.InputDeskChannel == 3,
-            "settings.json v0 com padrões antigos -> padrões do Core");
-
-        // v0 file with calibrated values -> values kept, rest from Core defaults.
-        var v0Cal = AppSettings.Parse("""{"ThresholdDb":-18,"RearmDb":-26,"MinIntervalMs":60}""", out _);
-        var t = v0Cal.ToTriggerSettings();
-        ok &= Check(t.ThresholdDb == -18f && t.RearmDb == -26f && t.MinIntervalMs == 60f && t.HighPassHz == d.HighPassHz,
-            "settings.json v0 calibrado mantém limiar/rearme/intervalo");
-
-        // Empty/new file and current-version round trip.
-        ok &= Check(AppSettings.Parse("{}", out _).ToTriggerSettings() == d, "settings.json vazio -> padrões do Core");
-        var cur = new AppSettings();
-        cur.FromTriggerSettings(d with { HighPassHz = 60f, FixedVelocity = true, RetriggerRiseDb = 0f });
-        cur.SettingsVersion = AppSettings.CurrentVersion;
-        var back = AppSettings.Parse(System.Text.Json.JsonSerializer.Serialize(cur), out _).ToTriggerSettings();
-        ok &= Check(back.HighPassHz == 60f && back.FixedVelocity && back.RetriggerRiseDb == 0f,
-            "settings.json atual: ida e volta dos campos avançados");
-        var untouched = new AppSettings();
-        untouched.FromTriggerSettings(d);
-        ok &= Check(untouched.ThresholdDb is null && untouched.HighPassHz is null && untouched.FixedVelocity is null,
-            "valores iguais ao padrão não são gravados (seguem o Core)");
-        return ok;
-    }
-
-    private static bool Check(bool condition, string what)
-    {
-        Console.WriteLine($"  [{(condition ? "OK" : "FALHA")}] {what}");
-        return condition;
+        return (bad.Count == 0, bad.Count == 0 ? "4 formatos ida e volta" : "falhou: " + string.Join(", ", bad));
     }
 }

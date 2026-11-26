@@ -13,6 +13,7 @@
   <ItemGroup>
     <!-- NAudio 3.x: the NAudio meta-package no longer includes ASIO; reference it directly. See docs/asio-naudio.md. -->
     <PackageReference Include="NAudio.Asio" Version="3.3.0" />
+    <PackageReference Include="NAudio.WinMM" Version="3.3.0" />
   </ItemGroup>
 
   <ItemGroup>
