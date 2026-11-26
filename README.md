@@ -83,20 +83,22 @@ dotnet run -c Release --project src/SampleDrum.App
 .\src\SampleDrum.App\bin\Release\net10.0-windows\SampleDrum.App.exe --simulation
 
 # cenário de teste completo sem a mesa (relatório e retornos gravados na pasta; código 0 = tudo certo)
-.\src\SampleDrum.App\bin\Release\net10.0-windows\SampleDrum.App.exe --harness C:\temp\sd-teste > harness.txt; Get-Content harness.txt
+.\src\SampleDrum.App\bin\Release\net10.0-windows\SampleDrum.App.exe --harness C:\temp\sd-teste | Out-Host; $LASTEXITCODE
 
-# teste sem hardware; grava a saída num arquivo
-.\src\SampleDrum.App\bin\Release\net10.0-windows\SampleDrum.App.exe --selftest > selftest.txt; Get-Content selftest.txt
+# teste sem hardware; grava a saída num arquivo e mostra o código de saída
+.\src\SampleDrum.App\bin\Release\net10.0-windows\SampleDrum.App.exe --selftest | Out-File selftest.txt; Get-Content selftest.txt; $LASTEXITCODE
 
 # listar os drivers ASIO instalados
-.\src\SampleDrum.App\bin\Release\net10.0-windows\SampleDrum.App.exe --list-drivers > drivers.txt; Get-Content drivers.txt
+.\src\SampleDrum.App\bin\Release\net10.0-windows\SampleDrum.App.exe --list-drivers | Out-Host
 
 # build self-contained para levar ao PC da igreja (pasta única, ~120 MB, sem instalar .NET)
 dotnet publish src/SampleDrum.App -c Release -r win-x64 --self-contained -o publish\SampleDrum-win-x64
 ```
 
-O app é um programa de janela (WinExe): para `--selftest` e `--list-drivers`, redirecione a saída para um
-arquivo como acima. `--selftest` termina com `RESULTADO: OK` e código de saída 0. A pasta `publish\` não deve
+O app é um programa de janela (WinExe) e o **PowerShell não espera** por um programa de janela quando a saída é
+redirecionada com `>` (nem com `$x = ...exe`): o comando volta na hora, o arquivo fica vazio e `$LASTEXITCODE` vem
+vazio. Use sempre `| Out-File arquivo.txt` ou `| Out-Host` como acima (no CMD: `start /wait ... & echo %ERRORLEVEL%`).
+`--selftest` termina com `RESULTADO: OK` e código de saída 0. Mais detalhes em [docs/harness.md](docs/harness.md). A pasta `publish\` não deve
 ser versionada; copie-a inteira para o PC e rode `SampleDrum.App.exe`.
 
 Detalhes do ASIO/NAudio: [docs/asio-naudio.md](docs/asio-naudio.md).
@@ -241,7 +243,8 @@ Ainda não confirmado (sem hardware até agora):
   (≈ −21 dBFS no microfone do surdo, no cenário sintético) não dispare o surdo; em troca, golpes **muito suaves** do
   surdo, cujo pico no caminho de detecção fique abaixo de ≈ −16 dBFS, deixam de disparar. Com a gravação da igreja,
   meça o vazamento do bumbo e o golpe mais suave do surdo e ponha o limiar entre os dois (mais perto do golpe se o
-  vazamento for baixo).
+  vazamento for baixo). Golpes suaves do surdo **perto do limiar** disparam cerca de **5 ms depois** dos fortes (o
+  detector espera a primeira crista da nota grave; medido no cenário sintético, a reconferir com a gravação real).
 - Envios e retornos USB da caixa, do tom e do surdo na mesa (hoje "pendentes").
 
 ## Documentação

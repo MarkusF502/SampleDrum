@@ -6,3 +6,8 @@ TestResults/
 artifacts/
 synthetic-out/
 publish/
+# saídas dos exemplos do README (PowerShell)
+selftest.txt
+harness.txt
+drivers.txt
+sd-teste/

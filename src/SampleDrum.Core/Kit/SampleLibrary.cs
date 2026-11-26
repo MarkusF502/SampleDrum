@@ -6,7 +6,15 @@ public sealed record SampleInfo(string Name, string Path, double DurationSeconds
     public string Id { get; init; } = "";
 }
 
-public enum PieceLoadErrorCode { FileNotFound, UnsupportedFormat, TooLong, OutsideLibrary, IoError }
+/// <summary>Stable error codes for UI/panel clients (the message is pt-BR text for people).</summary>
+public enum PieceLoadErrorCode
+{
+    FileNotFound, UnsupportedFormat, TooLong, OutsideLibrary, IoError,
+    /// <summary>The request itself was invalid (e.g. settings without detection values, non-finite gain).</summary>
+    InvalidArgument,
+    /// <summary>Unexpected failure while applying; the controller keeps running.</summary>
+    Internal,
+}
 
 /// <summary>Why one piece of a kit could not be prepared.</summary>
 public sealed record PieceLoadError(DrumPiece Piece, string? Path, string Message)
@@ -106,11 +114,16 @@ public sealed class SampleLibrary
         { return false; }
     }
 
-    private static bool IsDeviceName(string part)
+    /// <summary>
+    /// Windows reserved device names, with any extension and trailing spaces ("NUL .wav" is NUL):
+    /// CON, PRN, AUX, NUL, CONIN$, CONOUT$, COM0-9 and LPT0-9 including the superscript digits ¹ ² ³.
+    /// </summary>
+    internal static bool IsDeviceName(string part)
     {
-        string stem = part.Split('.')[0].ToUpperInvariant();
-        return stem is "CON" or "PRN" or "AUX" or "NUL" or "CONIN$" or "CONOUT$" ||
-            (stem.Length == 4 && (stem.StartsWith("COM") || stem.StartsWith("LPT")) && stem[3] is >= '1' and <= '9');
+        string stem = part.Split('.')[0].TrimEnd(' ').ToUpperInvariant();
+        if (stem is "CON" or "PRN" or "AUX" or "NUL" or "CONIN$" or "CONOUT$") return true;
+        return stem.Length == 4 && (stem.StartsWith("COM", StringComparison.Ordinal) || stem.StartsWith("LPT", StringComparison.Ordinal))
+               && (stem[3] is >= '0' and <= '9' or '\u00B9' or '\u00B2' or '\u00B3');
     }
 
     /// <summary>

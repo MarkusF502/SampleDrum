@@ -5,7 +5,7 @@ namespace SampleDrum.Core.Kit;
 /// <summary>Life cycle of a <see cref="KitOperation"/>. Applied/Failed/Superseded are terminal.</summary>
 public enum KitOperationStatus { Queued, Preparing, Applied, Failed, Superseded }
 /// <summary>Kinds of controller operations. <see cref="Preset"/> and <see cref="PreparedKit"/> replace the whole kit.</summary>
-public enum KitOperationKind { PieceSample, Preset, PieceEnabled, PieceGain, KitEnabled, PieceSettings, PreparedKit }
+public enum KitOperationKind { PieceSample, Preset, PieceEnabled, PieceGain, KitEnabled, PieceSettings, PreparedKit, LibraryFolder }
 
 public sealed record KitOperationSnapshot(Guid Id, KitOperationKind Kind, DrumPiece? Piece,
     KitOperationStatus Status, IReadOnlyList<PieceLoadError> Errors, long? ResultVersion);
@@ -52,7 +52,7 @@ public sealed record KitStateSnapshot(long Version, bool KitEnabled, string? Act
 public sealed class KitController : IAsyncDisposable
 {
     private readonly KitEngine _engine;
-    private readonly SampleLibrary _library;
+    private SampleLibrary _library;        // replaced only by a LibraryFolder operation (worker, under the gate)
     private readonly object _gate = new(); // controller callers/worker only; never used by Process
     private readonly Channel<Request> _queue = Channel.CreateUnbounded<Request>(new UnboundedChannelOptions
         { SingleReader = true, AllowSynchronousContinuations = false });
@@ -65,14 +65,15 @@ public sealed class KitController : IAsyncDisposable
     private KitStateSnapshot _snapshot;
     private bool _disposed;
 
-    public KitController(KitEngine engine, SampleLibrary library) : this(engine, library, library.PrepareAsync) { }
+    public KitController(KitEngine engine, SampleLibrary library) : this(engine, library, null) { }
 
     internal KitController(KitEngine engine, SampleLibrary library,
-        Func<KitPreset, int, CancellationToken, Task<KitPrepareResult>> prepare)
+        Func<KitPreset, int, CancellationToken, Task<KitPrepareResult>>? prepare)
     {
         _engine = engine ?? throw new ArgumentNullException(nameof(engine));
         _library = library ?? throw new ArgumentNullException(nameof(library));
-        _prepare = prepare;
+        // Default: always the CURRENT library (it can change with SetLibraryFolder).
+        _prepare = prepare ?? ((preset, rate, ct) => Library.PrepareAsync(preset, rate, ct));
         _snapshot = Capture(0);
         _worker = Task.Run(RunAsync);
     }
@@ -83,6 +84,12 @@ public sealed class KitController : IAsyncDisposable
     public long Version => Snapshot.Version;
     public KitOperationSnapshot? GetOperation(Guid id)
     { lock (_gate) return _operations.TryGetValue(id, out var op) ? op.Snapshot : null; }
+
+    /// <summary>Current sample library (changes only through <see cref="SetLibraryFolder"/>).</summary>
+    public SampleLibrary Library { get { lock (_gate) return _library; } }
+
+    /// <summary>Test hook: called on the worker right before an operation touches the engine.</summary>
+    internal Action<KitOperationSnapshot>? BeforeApply { get; set; }
 
     /// <summary>Untrusted library id; null removes the sample. Outside-library ids fail with a stable code.</summary>
     public KitOperation SetPieceSample(DrumPiece piece, string? sampleId) =>
@@ -95,21 +102,36 @@ public sealed class KitController : IAsyncDisposable
     public KitOperation ApplyPreset(KitPreset preset)
     {
         ArgumentNullException.ThrowIfNull(preset);
+        if (preset.Pieces is null)
+            return Enqueue(KitOperationKind.Preset, null, null, failure: Invalid(null, "Preset sem a lista de peças."));
         return Enqueue(KitOperationKind.Preset, null, preset with { Pieces = new Dictionary<DrumPiece, PiecePreset>(preset.Pieces) });
     }
-    public KitOperation SetPieceEnabled(DrumPiece piece, bool enabled) => Enqueue(KitOperationKind.PieceEnabled, piece, enabled);
-    public KitOperation SetPieceGain(DrumPiece piece, float gainDb)
+
+    /// <summary>
+    /// Changes the samples folder as a regular operation (Version keeps increasing, same controller and subscribers).
+    /// Later sample/preset operations resolve against the new folder.
+    /// </summary>
+    public KitOperation SetLibraryFolder(string folder)
     {
-        if (!float.IsFinite(gainDb)) throw new ArgumentOutOfRangeException(nameof(gainDb));
-        return Enqueue(KitOperationKind.PieceGain, piece, gainDb);
+        if (string.IsNullOrWhiteSpace(folder))
+            return Enqueue(KitOperationKind.LibraryFolder, null, null, failure: Invalid(null, "Pasta de samples vazia."));
+        return Enqueue(KitOperationKind.LibraryFolder, null, folder);
     }
+    public KitOperation SetPieceEnabled(DrumPiece piece, bool enabled) => Enqueue(KitOperationKind.PieceEnabled, piece, enabled);
+    public KitOperation SetPieceGain(DrumPiece piece, float gainDb) =>
+        float.IsFinite(gainDb)
+            ? Enqueue(KitOperationKind.PieceGain, piece, gainDb)
+            : Enqueue(KitOperationKind.PieceGain, piece, null, failure: Invalid(piece, $"Ganho inválido ({gainDb})."));
     public KitOperation SetKitEnabled(bool enabled) => Enqueue(KitOperationKind.KitEnabled, null, enabled);
 
     /// <summary>Detection + gain of one piece (normalized when applied).</summary>
     public KitOperation SetPieceSettings(DrumPiece piece, PieceSettings settings)
     {
         ArgumentNullException.ThrowIfNull(settings);
-        return Enqueue(KitOperationKind.PieceSettings, piece, settings);
+        string? problem = Validate(settings);
+        return problem is null
+            ? Enqueue(KitOperationKind.PieceSettings, piece, settings with { Trigger = settings.Trigger.Normalized() })
+            : Enqueue(KitOperationKind.PieceSettings, piece, null, failure: Invalid(piece, problem));
     }
 
     /// <summary>
@@ -119,22 +141,38 @@ public sealed class KitController : IAsyncDisposable
     public KitOperation ApplyKit(PreparedKit kit, KitSettings? settings = null)
     {
         ArgumentNullException.ThrowIfNull(kit);
-        return Enqueue(KitOperationKind.PreparedKit, null, (kit, settings));
+        string? problem = settings is null ? null
+            : DrumPieces.All.Select(p => Validate(settings[p]) is { } m ? $"{p.Label()}: {m}" : null).FirstOrDefault(m => m is not null);
+        return problem is null
+            ? Enqueue(KitOperationKind.PreparedKit, null, (kit, settings))
+            : Enqueue(KitOperationKind.PreparedKit, null, null, failure: Invalid(null, problem));
     }
+
+    /// <summary>Null when the settings can be applied; otherwise a pt-BR reason.</summary>
+    private static string? Validate(PieceSettings s) =>
+        s.Trigger is null ? "ajustes sem os valores de detecção (Trigger nulo)."
+        : !float.IsFinite(s.OutputGainDb) ? $"ganho inválido ({s.OutputGainDb})."
+        : null;
+
+    private static PieceLoadError Invalid(DrumPiece? piece, string message) =>
+        new(piece ?? DrumPiece.Kick, null, message) { Code = PieceLoadErrorCode.InvalidArgument };
 
     /// <summary>Number of finished operations kept for <see cref="GetOperation"/>.</summary>
     public const int OperationHistory = 256;
 
-    private KitOperation Enqueue(KitOperationKind kind, DrumPiece? piece, object? value, bool remoteId = false)
+    private KitOperation Enqueue(KitOperationKind kind, DrumPiece? piece, object? value, bool remoteId = false,
+        PieceLoadError? failure = null)
     {
         if (piece.HasValue && !piece.Value.IsValid()) throw new ArgumentOutOfRangeException(nameof(piece));
         lock (_gate)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
             var op = new KitOperation(kind, piece);
-            var request = new Request(op, value, remoteId);
-            foreach (var older in _pending)
-                if (Supersedes(op.Snapshot, older.Op.Snapshot)) older.Superseded = true;
+            var request = new Request(op, value, remoteId) { Failure = failure };
+            // An invalid request fails on the worker (in order) and never supersedes valid pending work.
+            if (failure is null)
+                foreach (var older in _pending)
+                    if (Supersedes(op.Snapshot, older.Op.Snapshot)) older.Superseded = true;
             _pending.Add(request);
             _operations.Add(op.Id, op);
             _queue.Writer.TryWrite(request);
@@ -156,6 +194,7 @@ public sealed class KitController : IAsyncDisposable
             KitOperationKind.PieceSettings => older.Kind is KitOperationKind.PieceSettings or KitOperationKind.PieceGain
                                               && older.Piece == newer.Piece,
             KitOperationKind.KitEnabled => older.Kind == KitOperationKind.KitEnabled,
+            KitOperationKind.LibraryFolder => older.Kind == KitOperationKind.LibraryFolder,
             _ => false,
         };
     }
@@ -164,22 +203,52 @@ public sealed class KitController : IAsyncDisposable
     {
         await foreach (var request in _queue.Reader.ReadAllAsync())
         {
-            var op = request.Op;
-            lock (_gate)
+            try
             {
-                if (request.Superseded || _disposed) op.Update(KitOperationStatus.Superseded);
-                else op.Update(KitOperationStatus.Preparing);
+                await ProcessAsync(request).ConfigureAwait(false);
             }
-            Notify();
-            if (op.Snapshot.Status == KitOperationStatus.Superseded)
-            { lock (_gate) { _pending.Remove(request); Retire(op); } continue; }
-            KitPrepareResult? result = null;
-            IReadOnlyList<PieceLoadError>? errors = null;
+            catch (Exception ex)
+            {
+                // Last line of defence: one broken operation must never stop the queue.
+                lock (_gate)
+                {
+                    if (request.Op.Snapshot.Status is KitOperationStatus.Queued or KitOperationStatus.Preparing)
+                        request.Op.Update(KitOperationStatus.Failed, [Internal(request.Op.Snapshot, ex)]);
+                    _pending.Remove(request);
+                    Retire(request.Op);
+                }
+                Notify();
+            }
+        }
+    }
+
+    private static PieceLoadError Internal(KitOperationSnapshot s, Exception ex) =>
+        new(s.Piece ?? DrumPiece.Kick, null, $"Falha inesperada ao aplicar a operação: {ex.Message}") { Code = PieceLoadErrorCode.Internal };
+
+    private async Task ProcessAsync(Request request)
+    {
+        var op = request.Op;
+        lock (_gate)
+        {
+            if (request.Superseded || _disposed) op.Update(KitOperationStatus.Superseded);
+            else op.Update(KitOperationStatus.Preparing);
+        }
+        Notify();
+        if (op.Snapshot.Status == KitOperationStatus.Superseded)
+        { lock (_gate) { _pending.Remove(request); Retire(op); } return; }
+        KitPrepareResult? result = null;
+        SampleLibrary? newLibrary = null;
+        IReadOnlyList<PieceLoadError>? errors = request.Failure is { } f ? [f] : null;
+        if (errors is null)
+        {
             try
             {
                 var s = op.Snapshot;
+                var library = Library;
                 if (s.Kind == KitOperationKind.Preset)
                     result = await _prepare((KitPreset)request.Value!, _engine.SampleRate, _stop.Token).ConfigureAwait(false);
+                else if (s.Kind == KitOperationKind.LibraryFolder)
+                    newLibrary = new SampleLibrary((string)request.Value!);
                 else if (s.Kind == KitOperationKind.PreparedKit)
                 {
                     var (kit, _) = ((PreparedKit, KitSettings?))request.Value!;
@@ -193,29 +262,39 @@ public sealed class KitController : IAsyncDisposable
                     string? path = (string?)request.Value;
                     if (request.RemoteId && path is not null)
                     {
-                        if (!_library.TryResolveInLibrary(path, out var resolved))
+                        if (!library.TryResolveInLibrary(path, out var resolved))
                             errors = [new PieceLoadError(s.Piece!.Value, path, "Sample fora da biblioteca.")
                                 { Code = PieceLoadErrorCode.OutsideLibrary }];
                         else path = resolved;
                     }
                     if (errors is null)
-                        result = await _library.PreparePieceAsync(_engine.ActiveKit ?? PreparedKit.Empty(_engine.SampleRate),
+                        result = await library.PreparePieceAsync(_engine.ActiveKit ?? PreparedKit.Empty(_engine.SampleRate),
                             s.Piece!.Value, path, _stop.Token).ConfigureAwait(false);
                 }
                 if (result is { Success: false }) errors = result.Errors;
             }
             catch (OperationCanceledException) when (_stop.IsCancellationRequested) { request.Superseded = true; }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException
+                                       && op.Snapshot.Kind == KitOperationKind.LibraryFolder)
+            {
+                errors = [new PieceLoadError(DrumPiece.Kick, (string?)request.Value, $"Pasta de samples inválida: {ex.Message}")
+                    { Code = PieceLoadErrorCode.InvalidArgument }];
+            }
             catch (Exception ex)
             {
                 errors = [new PieceLoadError(op.Snapshot.Piece ?? DrumPiece.Kick, null, $"Não foi possível preparar a operação: {ex.Message}")
                     { Code = PieceLoadErrorCode.IoError }];
             }
-            lock (_gate)
+        }
+        lock (_gate)
+        {
+            if (request.Superseded || _disposed) op.Update(KitOperationStatus.Superseded);
+            else if (errors is not null) op.Update(KitOperationStatus.Failed, errors);
+            else
             {
-                if (request.Superseded || _disposed) op.Update(KitOperationStatus.Superseded);
-                else if (errors is not null) op.Update(KitOperationStatus.Failed, errors);
-                else
+                try
                 {
+                    BeforeApply?.Invoke(op.Snapshot);
                     if (result?.Kit is { } kit)
                     {
                         // A custom piece selection no longer represents an exact preset.
@@ -224,6 +303,7 @@ public sealed class KitController : IAsyncDisposable
                         _engine.ApplyKit(kit);
                     }
                     var s = op.Snapshot;
+                    if (newLibrary is not null) _library = newLibrary;
                     if (s.Kind == KitOperationKind.PreparedKit && (((PreparedKit, KitSettings?))request.Value!).Item2 is { } ks)
                         foreach (var piece in DrumPieces.All) _engine.UpdatePieceSettings(piece, ks[piece]);
                     if (s.Kind == KitOperationKind.PieceSettings)
@@ -236,11 +316,18 @@ public sealed class KitController : IAsyncDisposable
                     Volatile.Write(ref _snapshot, snapshot);
                     op.Update(KitOperationStatus.Applied, version: snapshot.Version);
                 }
-                _pending.Remove(request);
-                Retire(op);
+                catch (Exception ex)
+                {
+                    // The engine may have been partly changed: publish what it really holds (Version moves so that
+                    // observers re-read), fail only this operation and keep the worker running.
+                    Volatile.Write(ref _snapshot, Capture(Version + 1));
+                    op.Update(KitOperationStatus.Failed, [Internal(op.Snapshot, ex)]);
+                }
             }
-            Notify();
+            _pending.Remove(request);
+            Retire(op);
         }
+        Notify();
     }
 
     /// <summary>Keeps only the last <see cref="OperationHistory"/> finished operations (caller holds the gate).</summary>
@@ -285,6 +372,7 @@ public sealed class KitController : IAsyncDisposable
         public KitOperation Op { get; } = op;
         public object? Value { get; } = value;
         public bool RemoteId { get; } = remoteId;
+        public PieceLoadError? Failure { get; init; }   // rejected at enqueue (invalid input): fails in order
         public bool Superseded;
     }
 }

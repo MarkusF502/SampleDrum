@@ -143,6 +143,33 @@ public sealed class AppConfig
         SetProfile(builtIn);
     }
 
+    /// <summary>
+    /// Startup restore of the saved kit as ONE whole-kit operation: a samples-only preset (no gain/detection, so the
+    /// stored calibration is not touched) whose <see cref="KitPreset.Id"/> is <see cref="ActivePresetId"/> when
+    /// <paramref name="activePreset"/> (the saved preset file, if it still exists) has exactly the same sample per
+    /// piece; otherwise the Id is null (custom selection). Paths are compared after resolving against the samples folder.
+    /// </summary>
+    public KitPreset ToStartupPreset(KitPreset? activePreset)
+    {
+        string root = Path.GetFullPath(EffectiveSamplesFolder);
+        string? Full(string? path)
+        {
+            if (string.IsNullOrEmpty(path)) return null;
+            try { return Path.GetFullPath(path, root); }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException) { return "\0invalid"; }
+        }
+        var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        bool matches = ActivePresetId is not null && activePreset is not null && activePreset.Id == ActivePresetId &&
+            DrumPieces.All.All(p => comparer.Equals(Full(this[p].SamplePath) ?? "", Full(activePreset[p]?.SamplePath) ?? ""));
+        return new KitPreset
+        {
+            Name = matches ? activePreset!.Name : "configuração",
+            Id = matches ? ActivePresetId : null,
+            Pieces = DrumPieces.All.Where(p => this[p].SamplePath is not null)
+                .ToDictionary(p => p, p => new PiecePreset(this[p].SamplePath)),
+        };
+    }
+
     /// <summary>Current selection as a preset (sample, gain and detection overrides of each piece).</summary>
     public KitPreset ToPreset(string name) => new()
     {
@@ -288,9 +315,31 @@ public sealed class AppConfig
         if (parsed.SettingsVersion > CurrentVersion)
             message = $"AVISO: configuração de uma versão mais nova ({parsed.SettingsVersion}); campos desconhecidos foram ignorados.";
         parsed.Normalize();
+        // Invalid paths (NUL character, ...) are corrupt values: drop them with a warning instead of failing the load.
+        var warnings = new List<string>();
+        string samplesRoot;
+        try { samplesRoot = Path.GetFullPath(parsed.EffectiveSamplesFolder); }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            warnings.Add("pasta de samples inválida; usando a padrão");
+            parsed.SamplesFolder = null;
+            samplesRoot = Path.GetFullPath(parsed.EffectiveSamplesFolder);
+        }
         foreach (var piece in parsed.Pieces)
-            if (piece.SamplePath is { Length: > 0 } path)
-                piece.SamplePath = Path.GetFullPath(path, Path.GetFullPath(parsed.EffectiveSamplesFolder));
+        {
+            if (piece.SamplePath is not { Length: > 0 } path) continue;
+            try { piece.SamplePath = Path.GetFullPath(path, samplesRoot); }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                piece.SamplePath = null;
+                warnings.Add($"{piece.Piece.Label()}: caminho de sample inválido descartado");
+            }
+        }
+        if (warnings.Count > 0)
+        {
+            string w = "AVISO: " + string.Join("; ", warnings) + ".";
+            message = message is null ? w : message + " " + w;
+        }
         return parsed;
     }
 

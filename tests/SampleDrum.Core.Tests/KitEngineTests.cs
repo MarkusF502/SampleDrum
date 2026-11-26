@@ -220,7 +220,10 @@ public class KitEngineTests
         long tol = 2 * ToleranceSamples;
         foreach (var x in sc.Expected)
         {
-            var near = events.Where(e => (int)e.Piece == x.Piece && Math.Abs(e.Event.SampleIndex - x.SampleIndex) <= tol).ToList();
+            // Soft floor-tom hits just above the -16 dBFS threshold cross on the tone's first crest (~5 ms late,
+            // deterministic): the scenario gives them their own tolerance.
+            long t = x.ToleranceMs is double ms ? (long)Math.Round(ms * Fs / 1000.0) : tol;
+            var near = events.Where(e => (int)e.Piece == x.Piece && Math.Abs(e.Event.SampleIndex - x.SampleIndex) <= t).ToList();
             if (x.ExpectTrigger) Assert.True(near.Count == 1, $"{(DrumPiece)x.Piece} {x.Label} @ {x.SampleIndex}: {near.Count} eventos");
             else Assert.True(near.Count == 0, $"{(DrumPiece)x.Piece} {x.Label} @ {x.SampleIndex}: disparou");
         }
@@ -397,10 +400,14 @@ public class KitEngineTests
         // Under a loaded parallel test run, tier-up/OSR compilation can still happen on this thread during an early
         // measured pass (a one-time few-KB cost). A real allocation in Process would repeat in EVERY pass (~3000
         // blocks), so require one complete pass with exactly zero bytes.
+        // Every measured pass (the first included) must also stay under a small cap: the JIT noise seen under load is
+        // ~6.5 KB, so a larger one-off allocation on the audio thread (e.g. a buffer created on a kit swap) still fails.
+        const long FirstPassCapBytes = 16 * 1024;
         var passes = new List<long>();
         for (int attempt = 0; attempt < 5; attempt++)
         {
             passes.Add(Pass(measure: true));
+            Assert.True(passes[^1] <= FirstPassCapBytes, "bytes alocados por passada: " + string.Join(", ", passes));
             if (passes[^1] == 0) break;
         }
         Assert.True(passes[^1] == 0, "bytes alocados por passada: " + string.Join(", ", passes));

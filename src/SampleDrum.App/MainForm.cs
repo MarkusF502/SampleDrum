@@ -20,7 +20,7 @@ public sealed class MainForm : Form
     private readonly SimulationPanel _sim = new();
     private IAudioHost? _host;
     private bool _hostStopFailed;      // last host Dispose threw: its audio thread may still be running
-    private KitController _controller; // single path for kit changes (samples, presets, settings, enables)
+    private readonly KitController _controller; // ONE for the whole run: single path for kit changes
     private bool _kitWanted;           // last requested kit master state (button toggles this)
     private bool _syntheticActive;     // the synthetic simulation kit is loaded in the engine (never persisted)
     private PreparedKit? _operatorKit; // operator's kit saved when the synthetic kit was loaded
@@ -79,7 +79,7 @@ public sealed class MainForm : Form
         _kit = new KitEngine(EngineRate, _cfg.ToKitSettings()) { KitEnabled = false }; // always start DISABLED
         foreach (var p in DrumPieces.All) _kit.SetPieceEnabled(p, _cfg[p].Enabled);
         _kit.ApplyKit(PreparedKit.Empty(EngineRate));
-        _controller = NewController();
+        _controller = new KitController(_kit, new SampleLibrary(_cfg.EffectiveSamplesFolder));
 
         BuildLayout();
         LoadConfigIntoUi();
@@ -102,7 +102,6 @@ public sealed class MainForm : Form
         _uiTimer.Start();
     }
 
-    private KitController NewController() => new(_kit, new SampleLibrary(_cfg.EffectiveSamplesFolder));
 
     // ---------- layout ----------
 
@@ -235,7 +234,7 @@ public sealed class MainForm : Form
         };
         _btnPresetFile.Click += async (_, _) => await OpenPresetFileAsync();
         _btnSavePreset.Click += (_, _) => SavePreset();
-        _btnSamplesFolder.Click += (_, _) => ChooseSamplesFolder();
+        _btnSamplesFolder.Click += async (_, _) => await ChooseSamplesFolderAsync();
 
         foreach (var panel in _panels)
         {
@@ -313,9 +312,35 @@ public sealed class MainForm : Form
     }
 
     /// <summary>Startup: one controller operation per configured sample, so one bad file does not block the others.</summary>
+    /// <summary>
+    /// Startup: the saved kit comes back as ONE whole-kit operation (samples only, calibration untouched) that keeps
+    /// the saved ActivePresetId when the pieces still match that preset file. If any file fails, falls back to one
+    /// operation per piece so a single bad file does not block the others.
+    /// </summary>
     private async Task LoadConfiguredSamplesAsync()
     {
-        var ops = DrumPieces.All.Where(p => _cfg[p].SamplePath is not null)
+        if (DrumPieces.All.All(p => _cfg[p].SamplePath is null)) return;
+        KitPreset? active = null;
+        if (_cfg.ActivePresetId is { Length: > 0 } id)
+        {
+            string file = Path.Combine(_cfg.EffectivePresetsFolder, id + ".json");
+            try { if (File.Exists(file)) active = KitPreset.Load(file); }
+            catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
+            {
+                Log($"AVISO: preset ativo \"{id}\" não pôde ser lido ({ex.Message}).");
+            }
+        }
+        var startup = _cfg.ToStartupPreset(active);
+        var whole = await _controller.ApplyPreset(startup).Completion;
+        if (whole.Status == KitOperationStatus.Applied)
+        {
+            foreach (var p in DrumPieces.All) _panels[(int)p].SetSampleText(SampleText(_kit.ActiveKit![p]));
+            if (startup.Id is not null) Log($"Kit do preset \"{startup.Name}\" restaurado.");
+            return;
+        }
+        ShowPieceErrors(whole.Errors);
+        Log("Alguns samples salvos falharam; carregando as outras peças uma a uma.");
+        var ops = DrumPieces.All.Where(p => _cfg[p].SamplePath is not null && whole.Errors.All(e => e.Piece != p))
             .Select(p => (Piece: p, Op: _controller.SetPieceSamplePath(p, _cfg[p].SamplePath))).ToList();
         foreach (var (p, op) in ops)
         {
@@ -439,19 +464,22 @@ public sealed class MainForm : Form
         _btnLoadPreset.Enabled = _cmbPresets.Items.Count > 0;
     }
 
-    private void ChooseSamplesFolder()
+    private async Task ChooseSamplesFolderAsync()
     {
         using var dlg = new FolderBrowserDialog { Description = "Pasta com os samples (WAV)", UseDescriptionForTitle = true };
         if (Directory.Exists(_cfg.EffectiveSamplesFolder)) dlg.SelectedPath = _cfg.EffectiveSamplesFolder;
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        // Same controller for the whole run: the folder change is an operation (Version keeps increasing).
+        var r = await _controller.SetLibraryFolder(dlg.SelectedPath).Completion;
+        if (r.Status != KitOperationStatus.Applied)
+        {
+            foreach (var e in r.Errors) Log("ERRO: " + e.Message);   // not a piece error: keep the piece labels as they are
+            Log("Pasta de samples NÃO trocada.");
+            return;
+        }
         _cfg.SamplesFolder = dlg.SelectedPath;
         _lblSamples.Text = dlg.SelectedPath;
-        // The controller resolves relative/remote sample ids against its library: switch to the new folder. Pending
-        // work of the old controller is superseded (never applied) when it is disposed.
-        var old = _controller;
-        _controller = NewController();
-        _ = old.DisposeAsync().AsTask();
-        var list = new SampleLibrary(dlg.SelectedPath).List();
+        var list = _controller.Library.List();
         Log($"Pasta de samples: {dlg.SelectedPath} ({list.Count} WAV)" +
             (list.Count > 0 ? ": " + string.Join(", ", list.Take(12).Select(s => $"{s.Name} ({s.DurationSeconds * 1000:0} ms)")) +
                               (list.Count > 12 ? ", ..." : "") : ""));
