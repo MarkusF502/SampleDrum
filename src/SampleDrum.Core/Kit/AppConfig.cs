@@ -3,6 +3,22 @@ using System.Text.Json.Serialization;
 
 namespace SampleDrum.Core.Kit;
 
+public sealed class PairedDeviceConfig
+{
+    public string Name { get; set; } = "";
+    public string TokenSha256Hex { get; set; } = "";
+    public DateTimeOffset PairedAtUtc { get; set; }
+    public DateTimeOffset? LastSeenUtc { get; set; }
+}
+
+public sealed class RemotePanelConfig
+{
+    public bool Enabled { get; set; }
+    public int Port { get; set; } = 8750;
+    public bool AllowPhoneTest { get; set; }
+    public List<PairedDeviceConfig> PairedDevices { get; set; } = [];
+}
+
 /// <summary>Persisted settings of one piece.</summary>
 public sealed class PieceConfig
 {
@@ -56,6 +72,9 @@ public sealed class AppConfig
 
     /// <summary>Samples folder; null = %AppData%\SampleDrum\Samples.</summary>
     public string? SamplesFolder { get; set; }
+
+    public RemotePanelConfig RemotePanel { get; set; } = new();
+    public string? ActivePresetId { get; set; }
 
     /// <summary>Default folder: %AppData%\SampleDrum.</summary>
     public static string DefaultDirectory { get; } = Path.Combine(
@@ -132,6 +151,7 @@ public sealed class AppConfig
     public void ApplyPreset(KitPreset preset)
     {
         ArgumentNullException.ThrowIfNull(preset);
+        ActivePresetId = preset.Id;
         foreach (var p in DrumPieces.All)
         {
             var c = this[p];
@@ -149,6 +169,8 @@ public sealed class AppConfig
     /// <summary>Ensures 4 pieces (in order), the built-in profiles, 4 routes per profile and a valid active profile.</summary>
     public void Normalize()
     {
+        RemotePanel ??= new();
+        RemotePanel.PairedDevices ??= [];
         SettingsVersion = CurrentVersion;
         var pieces = new List<PieceConfig>();
         foreach (var p in DrumPieces.All)
@@ -251,6 +273,9 @@ public sealed class AppConfig
         if (parsed.SettingsVersion > CurrentVersion)
             message = $"AVISO: configuração de uma versão mais nova ({parsed.SettingsVersion}); campos desconhecidos foram ignorados.";
         parsed.Normalize();
+        foreach (var piece in parsed.Pieces)
+            if (piece.SamplePath is { Length: > 0 } path)
+                piece.SamplePath = Path.GetFullPath(path, Path.GetFullPath(parsed.EffectiveSamplesFolder));
         return parsed;
     }
 
@@ -309,19 +334,56 @@ public sealed class AppConfig
         return cfg;
     }
 
-    public string ToJson() => JsonSerializer.Serialize(this, KitPreset.JsonOptions);
+    /// <summary>Serializes a detached snapshot, storing in-library paths relative to SamplesFolder.</summary>
+    public string ToJson()
+    {
+        var copy = Copy();
+        copy.Normalize();
+        string root = Path.GetFullPath(copy.EffectiveSamplesFolder);
+        foreach (var piece in copy.Pieces)
+        {
+            if (piece.SamplePath is not { Length: > 0 } path) continue;
+            string full = Path.GetFullPath(path, root);
+            string relative = Path.GetRelativePath(root, full);
+            piece.SamplePath = !Path.IsPathRooted(relative) && relative != ".." &&
+                !relative.StartsWith(".." + Path.DirectorySeparatorChar) ? relative.Replace('\\', '/') : full;
+        }
+        return JsonSerializer.Serialize(copy, KitPreset.JsonOptions);
+    }
+
+    private AppConfig Copy() => JsonSerializer.Deserialize<AppConfig>(
+        JsonSerializer.Serialize(this, KitPreset.JsonOptions), KitPreset.JsonOptions)!;
+
+    /// <summary>Persists a controller snapshot; the kit master enable is deliberately not stored.</summary>
+    public void Save(string path, KitStateSnapshot snapshot)
+    {
+        var copy = Copy();
+        copy.Normalize();
+        copy.ActivePresetId = snapshot.ActivePresetId;
+        foreach (var piece in snapshot.Pieces)
+        {
+            copy[piece.Piece].SamplePath = piece.SamplePath;
+            copy[piece.Piece].Enabled = piece.Enabled;
+            copy.SetPieceSettings(piece.Piece, piece.Settings);
+        }
+        copy.Save(path);
+    }
 
     public void Save() => Save(DefaultFilePath);
 
     /// <summary>Writes atomically (temp file + move).</summary>
     public void Save(string path)
     {
-        Normalize();
+        string json = ToJson();
         var dir = Path.GetDirectoryName(Path.GetFullPath(path));
         if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
-        string tmp = path + ".tmp";
-        File.WriteAllText(tmp, ToJson());
-        File.Move(tmp, path, overwrite: true);
+        string tmp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, path, overwrite: true);
+        }
+        finally { if (File.Exists(tmp)) File.Delete(tmp); }
     }
 
     /// <summary>Fields of the v1 app settings file (all optional).</summary>

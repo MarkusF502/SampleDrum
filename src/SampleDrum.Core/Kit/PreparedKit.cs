@@ -29,10 +29,14 @@ public sealed class PreparedKit
     /// <param name="sampleRate">Rate the samples were prepared at (must match the engine).</param>
     /// <param name="pieces">Exactly one entry per piece, in any order.</param>
     public PreparedKit(string name, int sampleRate, IEnumerable<PreparedPiece> pieces)
+        : this(name, sampleRate, pieces, null) { }
+
+    public PreparedKit(string name, int sampleRate, IEnumerable<PreparedPiece> pieces, string? presetId)
     {
         ArgumentNullException.ThrowIfNull(pieces);
         if (sampleRate <= 0) throw new ArgumentOutOfRangeException(nameof(sampleRate));
         Name = name ?? "";
+        PresetId = presetId;
         SampleRate = sampleRate;
         _pieces = new PreparedPiece[DrumPieces.Count];
         foreach (var p in pieces)
@@ -46,10 +50,11 @@ public sealed class PreparedKit
     }
 
     public string Name { get; }
+    public string? PresetId { get; }
     public int SampleRate { get; }
 
     /// <summary>Pieces in <see cref="DrumPiece"/> order.</summary>
-    public IReadOnlyList<PreparedPiece> Pieces => _pieces;
+    public IReadOnlyList<PreparedPiece> Pieces => Array.AsReadOnly(_pieces);
 
     public PreparedPiece this[DrumPiece p] => _pieces[(int)p];
 
@@ -57,9 +62,10 @@ public sealed class PreparedKit
     public PreparedKit WithPiece(PreparedPiece piece, string? name = null)
     {
         ArgumentNullException.ThrowIfNull(piece);
+        if (!piece.Piece.IsValid()) throw new ArgumentOutOfRangeException(nameof(piece));
         var copy = (PreparedPiece[])_pieces.Clone();
         copy[(int)piece.Piece] = piece;
-        return new PreparedKit(name ?? Name, SampleRate, copy);
+        return new PreparedKit(name ?? Name, SampleRate, copy, PresetId);
     }
 
     /// <summary>
@@ -67,7 +73,7 @@ public sealed class PreparedKit
     /// re-applying the kit never reverts gains or settings the operator changed after the preset was applied.
     /// </summary>
     public PreparedKit SamplesOnly() =>
-        new(Name, SampleRate, _pieces.Select(p => p with { GainDb = null, Detection = null }));
+        new(Name, SampleRate, _pieces.Select(p => p with { GainDb = null, Detection = null }), PresetId);
 
     /// <summary>A kit without samples.</summary>
     public static PreparedKit Empty(int sampleRate, string name = "") =>

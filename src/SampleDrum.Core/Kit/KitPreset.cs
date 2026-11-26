@@ -17,6 +17,9 @@ public sealed record KitPreset
     public int PresetVersion { get; init; } = CurrentVersion;
     public string Name { get; init; } = "";
 
+    /// <summary>Stable file identity, independent of the display name. Load always uses the file name without .json.</summary>
+    public string? Id { get; init; }
+
     /// <summary>Pieces present in the preset; a missing piece means "no sample" for that piece.</summary>
     public IReadOnlyDictionary<DrumPiece, PiecePreset> Pieces { get; init; } = new Dictionary<DrumPiece, PiecePreset>();
 
@@ -50,6 +53,7 @@ public sealed record KitPreset
     public static KitPreset Load(string path)
     {
         var preset = FromJson(File.ReadAllText(path));
+        preset = preset with { Id = Path.GetFileNameWithoutExtension(path) };
         return string.IsNullOrWhiteSpace(preset.Name) ? preset with { Name = Path.GetFileNameWithoutExtension(path) } : preset;
     }
 
