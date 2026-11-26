@@ -36,6 +36,8 @@ public sealed class KitEngine : IMultiChannelProcessor
     private volatile bool _kitEnabled;
     private long _position;
     private long _seq;
+    private long _kitGeneration;
+    private long _appliedKitGeneration;
 
     public KitEngine(int sampleRate, KitSettings settings)
     {
@@ -107,7 +109,6 @@ public sealed class KitEngine : IMultiChannelProcessor
             foreach (var p in DrumPieces.All)
             {
                 var piece = kit[p];
-                if (piece.GainDb is null && piece.Detection is null) continue;
                 int i = (int)p;
                 var s = _settings[i];
                 if (piece.Detection is { } det) s = s with { Trigger = det.ApplyTo(KitDefaults.TriggerFor(p)) };
@@ -116,7 +117,7 @@ public sealed class KitEngine : IMultiChannelProcessor
                 parms[i] = BuildParams(s);
             }
             Volatile.Write(ref _submittedKit, kit);
-            Volatile.Write(ref _pendingKit, new KitSwap(kit, parms, Interlocked.Increment(ref _seq)));
+            Volatile.Write(ref _pendingKit, new KitSwap(kit, parms, Interlocked.Increment(ref _seq), ++_kitGeneration));
         }
     }
 
@@ -126,13 +127,16 @@ public sealed class KitEngine : IMultiChannelProcessor
     /// <summary>Kit used by the last processed block (audio-thread view; diagnostics/tests).</summary>
     public PreparedKit? PlayingKit => Volatile.Read(ref _playingKit);
 
-    /// <summary>UI/logging thread (single consumer).</summary>
+    /// <summary>Generation of the last kit swap taken by Process (or idle Reset); zero before the first swap.</summary>
+    public long AppliedKitGeneration => Volatile.Read(ref _appliedKitGeneration);
+
+    /// <summary>Single consumer only: the app drains this queue and fans events out to UI and remote observers.</summary>
     public bool TryDequeueEvent(out KitEvent e) => _events.TryDequeue(out e);
 
     /// <summary>Events lost because the consumer did not drain the queue in time.</summary>
     public long DroppedEvents => _events.Dropped;
 
-    /// <summary>Linear input peak of a piece since the previous call (meter).</summary>
+    /// <summary>Single consumer only: the app samples this destructive meter read and fans it out to observers.</summary>
     public float ReadAndResetInputPeak(DrumPiece p) => _pipes[Index(p)].ReadAndResetInputPeak();
 
     /// <summary>Voices sounding on a piece (diagnostics; audio thread or idle).</summary>
@@ -204,8 +208,9 @@ public sealed class KitEngine : IMultiChannelProcessor
         }
         if (swap != null)
         {
-            for (int i = 0; i < _samples.Length; i++) _samples[i] = swap.Kit.Pieces[i].Samples;
+            for (int i = 0; i < _samples.Length; i++) _samples[i] = swap.Kit[(DrumPiece)i].Samples;
             Volatile.Write(ref _playingKit, swap.Kit);
+            Volatile.Write(ref _appliedKitGeneration, swap.Generation);
         }
     }
 
@@ -217,7 +222,7 @@ public sealed class KitEngine : IMultiChannelProcessor
 
     private sealed record PendingParams(EngineParams Params, long Seq);
 
-    private sealed record KitSwap(PreparedKit Kit, EngineParams?[] Params, long Seq);
+    private sealed record KitSwap(PreparedKit Kit, EngineParams?[] Params, long Seq, long Generation);
 
     private sealed class PieceSink(DrumPiece piece, EventRing<KitEvent> ring) : TriggerEventSink
     {
