@@ -2,8 +2,10 @@
 
 namespace SampleDrum.Core.Kit;
 
+/// <summary>Life cycle of a <see cref="KitOperation"/>. Applied/Failed/Superseded are terminal.</summary>
 public enum KitOperationStatus { Queued, Preparing, Applied, Failed, Superseded }
-public enum KitOperationKind { PieceSample, Preset, PieceEnabled, PieceGain, KitEnabled }
+/// <summary>Kinds of controller operations. <see cref="Preset"/> and <see cref="PreparedKit"/> replace the whole kit.</summary>
+public enum KitOperationKind { PieceSample, Preset, PieceEnabled, PieceGain, KitEnabled, PieceSettings, PreparedKit }
 
 public sealed record KitOperationSnapshot(Guid Id, KitOperationKind Kind, DrumPiece? Piece,
     KitOperationStatus Status, IReadOnlyList<PieceLoadError> Errors, long? ResultVersion);
@@ -38,6 +40,14 @@ public sealed record KitStateSnapshot(long Version, bool KitEnabled, string? Act
 /// Applied means submitted to the engine (also while stopped); observe KitEngine.AppliedKitGeneration for audio
 /// acknowledgement. Each successful operation increments Version once. Overlapping newer requests supersede
 /// pending work, including in-flight preparation, before it can touch the engine. Failed preparation changes nothing.
+/// <para>
+/// Last-writer-wins is directional: an operation only supersedes older pending ones it fully covers. A whole-kit
+/// change (<see cref="ApplyPreset"/>, <see cref="ApplyKit"/>) supersedes older whole-kit changes and older sample
+/// changes; a sample change supersedes older sample changes of the same piece only (it never cancels a pending
+/// preset, whose other pieces would be lost); enable/gain/settings/kit-enable supersede the same kind for the same
+/// target. Everything else is applied in submission order.
+/// </para>
+/// <para>Only the last <see cref="OperationHistory"/> finished operations stay queryable through <see cref="GetOperation"/>.</para>
 /// </summary>
 public sealed class KitController : IAsyncDisposable
 {
@@ -47,6 +57,7 @@ public sealed class KitController : IAsyncDisposable
     private readonly Channel<Request> _queue = Channel.CreateUnbounded<Request>(new UnboundedChannelOptions
         { SingleReader = true, AllowSynchronousContinuations = false });
     private readonly Dictionary<Guid, KitOperation> _operations = [];
+    private readonly Queue<Guid> _finished = new();   // terminal operations, oldest first (bounded history)
     private readonly List<Request> _pending = [];
     private readonly CancellationTokenSource _stop = new();
     private readonly Task _worker;
@@ -94,6 +105,26 @@ public sealed class KitController : IAsyncDisposable
     }
     public KitOperation SetKitEnabled(bool enabled) => Enqueue(KitOperationKind.KitEnabled, null, enabled);
 
+    /// <summary>Detection + gain of one piece (normalized when applied).</summary>
+    public KitOperation SetPieceSettings(DrumPiece piece, PieceSettings settings)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        return Enqueue(KitOperationKind.PieceSettings, piece, settings);
+    }
+
+    /// <summary>
+    /// Applies an already prepared kit (e.g. the synthetic simulation kit) as a whole-kit change; optional per-piece
+    /// settings are applied with it. Sample rate mismatch fails the operation (the engine stays untouched).
+    /// </summary>
+    public KitOperation ApplyKit(PreparedKit kit, KitSettings? settings = null)
+    {
+        ArgumentNullException.ThrowIfNull(kit);
+        return Enqueue(KitOperationKind.PreparedKit, null, (kit, settings));
+    }
+
+    /// <summary>Number of finished operations kept for <see cref="GetOperation"/>.</summary>
+    public const int OperationHistory = 256;
+
     private KitOperation Enqueue(KitOperationKind kind, DrumPiece? piece, object? value, bool remoteId = false)
     {
         if (piece.HasValue && !piece.Value.IsValid()) throw new ArgumentOutOfRangeException(nameof(piece));
@@ -103,7 +134,7 @@ public sealed class KitController : IAsyncDisposable
             var op = new KitOperation(kind, piece);
             var request = new Request(op, value, remoteId);
             foreach (var older in _pending)
-                if (Overlaps(older.Op.Snapshot, op.Snapshot)) older.Superseded = true;
+                if (Supersedes(op.Snapshot, older.Op.Snapshot)) older.Superseded = true;
             _pending.Add(request);
             _operations.Add(op.Id, op);
             _queue.Writer.TryWrite(request);
@@ -111,11 +142,22 @@ public sealed class KitController : IAsyncDisposable
         }
     }
 
-    private static bool Overlaps(KitOperationSnapshot a, KitOperationSnapshot b)
+    /// <summary>True when <paramref name="newer"/> fully covers <paramref name="older"/> (see class remarks).</summary>
+    internal static bool Supersedes(KitOperationSnapshot newer, KitOperationSnapshot older)
     {
-        if (a.Kind == KitOperationKind.KitEnabled || b.Kind == KitOperationKind.KitEnabled)
-            return a.Kind == b.Kind;
-        return a.Kind == KitOperationKind.Preset || b.Kind == KitOperationKind.Preset || a.Piece == b.Piece;
+        static bool WholeKit(KitOperationKind k) => k is KitOperationKind.Preset or KitOperationKind.PreparedKit;
+        if (WholeKit(newer.Kind)) return WholeKit(older.Kind) || older.Kind == KitOperationKind.PieceSample;
+        return newer.Kind switch
+        {
+            KitOperationKind.PieceSample => older.Kind == KitOperationKind.PieceSample && older.Piece == newer.Piece,
+            KitOperationKind.PieceEnabled => older.Kind == KitOperationKind.PieceEnabled && older.Piece == newer.Piece,
+            KitOperationKind.PieceGain => older.Kind == KitOperationKind.PieceGain && older.Piece == newer.Piece,
+            // Settings carry the gain too, so they also cover an older gain change of the same piece.
+            KitOperationKind.PieceSettings => older.Kind is KitOperationKind.PieceSettings or KitOperationKind.PieceGain
+                                              && older.Piece == newer.Piece,
+            KitOperationKind.KitEnabled => older.Kind == KitOperationKind.KitEnabled,
+            _ => false,
+        };
     }
 
     private async Task RunAsync()
@@ -130,7 +172,7 @@ public sealed class KitController : IAsyncDisposable
             }
             Notify();
             if (op.Snapshot.Status == KitOperationStatus.Superseded)
-            { lock (_gate) _pending.Remove(request); continue; }
+            { lock (_gate) { _pending.Remove(request); Retire(op); } continue; }
             KitPrepareResult? result = null;
             IReadOnlyList<PieceLoadError>? errors = null;
             try
@@ -138,6 +180,14 @@ public sealed class KitController : IAsyncDisposable
                 var s = op.Snapshot;
                 if (s.Kind == KitOperationKind.Preset)
                     result = await _prepare((KitPreset)request.Value!, _engine.SampleRate, _stop.Token).ConfigureAwait(false);
+                else if (s.Kind == KitOperationKind.PreparedKit)
+                {
+                    var (kit, _) = ((PreparedKit, KitSettings?))request.Value!;
+                    if (kit.SampleRate != _engine.SampleRate)
+                        errors = [new PieceLoadError(DrumPiece.Kick, null,
+                            $"Kit preparado a {kit.SampleRate} Hz; o motor roda a {_engine.SampleRate} Hz.") { Code = PieceLoadErrorCode.UnsupportedFormat }];
+                    else result = new KitPrepareResult(kit, [], []);
+                }
                 else if (s.Kind == KitOperationKind.PieceSample)
                 {
                     string? path = (string?)request.Value;
@@ -174,6 +224,10 @@ public sealed class KitController : IAsyncDisposable
                         _engine.ApplyKit(kit);
                     }
                     var s = op.Snapshot;
+                    if (s.Kind == KitOperationKind.PreparedKit && (((PreparedKit, KitSettings?))request.Value!).Item2 is { } ks)
+                        foreach (var piece in DrumPieces.All) _engine.UpdatePieceSettings(piece, ks[piece]);
+                    if (s.Kind == KitOperationKind.PieceSettings)
+                        _engine.UpdatePieceSettings(s.Piece!.Value, (PieceSettings)request.Value!);
                     if (s.Kind == KitOperationKind.PieceEnabled) _engine.SetPieceEnabled(s.Piece!.Value, (bool)request.Value!);
                     if (s.Kind == KitOperationKind.PieceGain)
                         _engine.UpdatePieceSettings(s.Piece!.Value, _engine.Settings[s.Piece.Value] with { OutputGainDb = (float)request.Value! });
@@ -183,9 +237,17 @@ public sealed class KitController : IAsyncDisposable
                     op.Update(KitOperationStatus.Applied, version: snapshot.Version);
                 }
                 _pending.Remove(request);
+                Retire(op);
             }
             Notify();
         }
+    }
+
+    /// <summary>Keeps only the last <see cref="OperationHistory"/> finished operations (caller holds the gate).</summary>
+    private void Retire(KitOperation op)
+    {
+        _finished.Enqueue(op.Id);
+        while (_finished.Count > OperationHistory) _operations.Remove(_finished.Dequeue());
     }
 
     private KitStateSnapshot Capture(long version)

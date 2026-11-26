@@ -20,7 +20,8 @@ public sealed class MainForm : Form
     private readonly SimulationPanel _sim = new();
     private IAudioHost? _host;
     private bool _hostStopFailed;      // last host Dispose threw: its audio thread may still be running
-    private bool _kitBusy;             // a sample/preset is being prepared off the UI thread
+    private KitController _controller; // single path for kit changes (samples, presets, settings, enables)
+    private bool _kitWanted;           // last requested kit master state (button toggles this)
     private Task? _initialLoad;
     private long _eventCount;
     private string _lastLatencyText = "";
@@ -70,6 +71,7 @@ public sealed class MainForm : Form
         _kit = new KitEngine(EngineRate, _cfg.ToKitSettings()) { KitEnabled = false }; // always start DISABLED
         foreach (var p in DrumPieces.All) _kit.SetPieceEnabled(p, _cfg[p].Enabled);
         _kit.ApplyKit(PreparedKit.Empty(EngineRate));
+        _controller = NewController();
 
         BuildLayout();
         LoadConfigIntoUi();
@@ -83,7 +85,7 @@ public sealed class MainForm : Form
         if (StartupOptions.SimulationMode)
         {
             Log("Modo --simulation: perfil \"Simulação\", host de simulação e kit sintético.");
-            LoadSyntheticKit(StartupOptions.SimulationSeed);
+            _initialLoad = LoadSyntheticKitAsync(StartupOptions.SimulationSeed);
         }
         else
         {
@@ -92,7 +94,7 @@ public sealed class MainForm : Form
         _uiTimer.Start();
     }
 
-    private Library Lib => new(new SampleLibrary(_cfg.EffectiveSamplesFolder));
+    private KitController NewController() => new(_kit, new SampleLibrary(_cfg.EffectiveSamplesFolder));
 
     // ---------- layout ----------
 
@@ -191,7 +193,6 @@ public sealed class MainForm : Form
                 f.PreviewEnabled = _sim.PreviewEnabled;
             }
         };
-        _sim.SyntheticKitRequested += (_, seed) => LoadSyntheticKit(seed);
         _btnRefresh.Click += (_, _) => PopulateDrivers();
         _btnPanel.Click += (_, _) => OpenAsioPanel();
         _cmbProfile.SelectedIndexChanged += (_, _) =>
@@ -207,9 +208,11 @@ public sealed class MainForm : Form
         _btnEditRoutes.Click += (_, _) => EditRoutes();
         _btnStart.Click += async (_, _) => await StartAudioAsync();
         _btnStop.Click += (_, _) => StopAudio("Áudio parado pelo usuário.");
-        _btnKit.Click += (_, _) =>
+        _btnKit.Click += async (_, _) =>
         {
-            _kit.KitEnabled = !_kit.KitEnabled;
+            _kitWanted = !_kitWanted;
+            var result = await _controller.SetKitEnabled(_kitWanted).Completion;
+            if (result.Status != KitOperationStatus.Applied) return;   // superseded by a newer click
             Log(_kit.KitEnabled ? "Kit ATIVADO." : "Kit DESATIVADO (retornos em silêncio; teste manual continua funcionando).");
             UpdateKitUi();
         };
@@ -226,12 +229,12 @@ public sealed class MainForm : Form
             var p = panel.Piece;
             panel.SettingsChanged += (_, s) =>
             {
-                _kit.UpdatePieceSettings(p, s);
+                _controller.SetPieceSettings(p, s);
                 _cfg.SetPieceSettings(p, s);
             };
             panel.PieceEnabledChanged += (_, on) =>
             {
-                _kit.SetPieceEnabled(p, on);
+                _controller.SetPieceEnabled(p, on);
                 _cfg[p].Enabled = on;
                 Log($"{p.Label()}: {(on ? "ativa" : "desativada (retorno em silêncio)")}.");
                 SaveConfig();
@@ -240,6 +243,7 @@ public sealed class MainForm : Form
             panel.ChooseWavRequested += async (_, _) => await ChooseWavAsync(p);
             panel.ClearSampleRequested += async (_, _) => await SetPieceSampleAsync(p, null);
         }
+        _sim.SyntheticKitRequested += async (_, seed) => await LoadSyntheticKitAsync(seed);
         _uiTimer.Tick += (_, _) => OnUiTick();
         FormClosing += (_, _) => OnClosing();
     }
@@ -289,37 +293,22 @@ public sealed class MainForm : Form
 
     // ---------- samples / presets ----------
 
-    private sealed record Library(SampleLibrary Samples);
-
     private sealed record PresetItem(KitPreset Preset)
     {
         public override string ToString() => Preset.Name;
     }
 
-    /// <summary>Startup: each configured sample is prepared on its own, so one bad file does not block the others.</summary>
+    /// <summary>Startup: one controller operation per configured sample, so one bad file does not block the others.</summary>
     private async Task LoadConfiguredSamplesAsync()
     {
-        var lib = Lib.Samples;
-        var kit = PreparedKit.Empty(EngineRate, "configuração");
-        SetKitBusy(true);
-        try
+        var ops = DrumPieces.All.Where(p => _cfg[p].SamplePath is not null)
+            .Select(p => (Piece: p, Op: _controller.SetPieceSamplePath(p, _cfg[p].SamplePath))).ToList();
+        foreach (var (p, op) in ops)
         {
-            foreach (var p in DrumPieces.All)
-            {
-                var path = _cfg[p].SamplePath;
-                if (path is null) continue;
-                var r = await lib.PreparePieceAsync(kit, p, path);
-                LogNotes(r);
-                if (r.Success) { kit = r.Kit!; _panels[(int)p].SetSampleText(SampleText(kit[p])); }
-                else ShowPieceErrors(r);
-            }
-            _kit.ApplyKit(kit);
+            var r = await op.Completion;
+            if (r.Status == KitOperationStatus.Applied) _panels[(int)p].SetSampleText(SampleText(_kit.ActiveKit![p]));
+            else ShowPieceErrors(r.Errors);
         }
-        catch (Exception ex)
-        {
-            Log($"ERRO ao carregar os samples: {ex.Message}");
-        }
-        finally { SetKitBusy(false); }
     }
 
     private async Task ChooseWavAsync(DrumPiece p)
@@ -336,58 +325,58 @@ public sealed class MainForm : Form
         await SetPieceSampleAsync(p, dlg.FileName);
     }
 
-    /// <summary>Single-piece change: prepare off the UI thread, then one ApplyKit (valid from the next hit).</summary>
+    /// <summary>
+    /// Single-piece change through the controller: prepared off the UI thread, then one ApplyKit (valid from the next
+    /// hit). A newer request for the same piece (or a preset) supersedes this one.
+    /// </summary>
     private async Task SetPieceSampleAsync(DrumPiece p, string? path)
     {
-        if (!TryBeginKitWork()) return;
-        try
+        var r = await _controller.SetPieceSamplePath(p, path).Completion;
+        switch (r.Status)
         {
-            var r = await Lib.Samples.PreparePieceAsync(_kit.ActiveKit ?? PreparedKit.Empty(EngineRate), p, path);
-            LogNotes(r);
-            if (!r.Success)
-            {
-                ShowPieceErrors(r);
+            case KitOperationStatus.Applied:
+                _cfg[p].SamplePath = path;
+                _cfg.ActivePresetId = null;                       // custom selection
+                _panels[(int)p].SetSampleText(SampleText(_kit.ActiveKit![p]));
+                Log(path is null ? $"{p.Label()}: sem sample." : $"{p.Label()}: sample {path} (vale a partir do próximo golpe).");
+                SaveConfig();
+                break;
+            case KitOperationStatus.Failed:
+                ShowPieceErrors(r.Errors);
                 Log($"{p.Label()}: sample anterior mantido.");
-                return;
-            }
-            _kit.ApplyKit(r.Kit!);
-            _cfg[p].SamplePath = path;
-            _panels[(int)p].SetSampleText(SampleText(r.Kit![p]));
-            Log(path is null ? $"{p.Label()}: sem sample." : $"{p.Label()}: sample {path} (vale a partir do próximo golpe).");
-            SaveConfig();
+                break;
+            default:
+                Log($"{p.Label()}: troca de sample substituída por um pedido mais novo.");
+                break;
         }
-        catch (Exception ex) { Log($"ERRO ao carregar o sample de {p.Label()}: {ex.Message}"); }
-        finally { SetKitBusy(false); }
     }
 
-    /// <summary>Applies a preset: prepare ALL samples off the UI thread; only a complete kit is applied (one swap).</summary>
+    /// <summary>Applies a preset through the controller: ALL samples prepared first; only a complete kit is applied (one swap).</summary>
     private async Task ApplyPresetAsync(KitPreset preset)
     {
-        if (!TryBeginKitWork()) return;
-        try
+        Log($"Preparando o preset \"{preset.Name}\"...");
+        var r = await _controller.ApplyPreset(preset).Completion;
+        switch (r.Status)
         {
-            Log($"Preparando o preset \"{preset.Name}\"...");
-            var r = await Lib.Samples.PrepareAsync(preset, EngineRate);
-            LogNotes(r);
-            if (!r.Success)
-            {
-                ShowPieceErrors(r);
+            case KitOperationStatus.Applied:
+                _cfg.ApplyPreset(preset);
+                var settings = _kit.Settings;
+                foreach (var p in DrumPieces.All)
+                {
+                    _panels[(int)p].ShowSettings(settings[p]);
+                    _panels[(int)p].SetSampleText(SampleText(_kit.ActiveKit![p]));
+                }
+                Log($"Preset \"{preset.Name}\" aplicado (as quatro peças trocadas no mesmo bloco).");
+                SaveConfig();
+                break;
+            case KitOperationStatus.Failed:
+                ShowPieceErrors(r.Errors);
                 Log($"Preset \"{preset.Name}\" NÃO aplicado: o kit atual foi mantido.");
-                return;
-            }
-            _kit.ApplyKit(r.Kit!);
-            _cfg.ApplyPreset(preset);
-            var settings = _kit.Settings;
-            foreach (var p in DrumPieces.All)
-            {
-                _panels[(int)p].ShowSettings(settings[p]);
-                _panels[(int)p].SetSampleText(SampleText(r.Kit![p]));
-            }
-            Log($"Preset \"{preset.Name}\" aplicado (as quatro peças trocadas no mesmo bloco).");
-            SaveConfig();
+                break;
+            default:
+                Log($"Preset \"{preset.Name}\" substituído por um pedido mais novo.");
+                break;
         }
-        catch (Exception ex) { Log($"ERRO ao aplicar o preset: {ex.Message}"); }
-        finally { SetKitBusy(false); }
     }
 
     private async Task OpenPresetFileAsync()
@@ -431,7 +420,7 @@ public sealed class MainForm : Form
         var match = _cmbPresets.Items.Cast<PresetItem>().FirstOrDefault(i => i.Preset.Name == select);
         if (match is not null) _cmbPresets.SelectedItem = match;
         else if (_cmbPresets.Items.Count > 0) _cmbPresets.SelectedIndex = 0;
-        _btnLoadPreset.Enabled = _cmbPresets.Items.Count > 0 && !_kitBusy;
+        _btnLoadPreset.Enabled = _cmbPresets.Items.Count > 0;
     }
 
     private void ChooseSamplesFolder()
@@ -441,44 +430,29 @@ public sealed class MainForm : Form
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
         _cfg.SamplesFolder = dlg.SelectedPath;
         _lblSamples.Text = dlg.SelectedPath;
-        var list = Lib.Samples.List();
+        // The controller resolves relative/remote sample ids against its library: switch to the new folder. Pending
+        // work of the old controller is superseded (never applied) when it is disposed.
+        var old = _controller;
+        _controller = NewController();
+        _ = old.DisposeAsync().AsTask();
+        var list = new SampleLibrary(dlg.SelectedPath).List();
         Log($"Pasta de samples: {dlg.SelectedPath} ({list.Count} WAV)" +
             (list.Count > 0 ? ": " + string.Join(", ", list.Take(12).Select(s => $"{s.Name} ({s.DurationSeconds * 1000:0} ms)")) +
                               (list.Count > 12 ? ", ..." : "") : ""));
         SaveConfig();
     }
 
-    private bool TryBeginKitWork()
-    {
-        if (_kitBusy) { Log("Aguarde: um sample/preset ainda está sendo preparado."); return false; }
-        SetKitBusy(true);
-        return true;
-    }
-
-    private void SetKitBusy(bool busy)
-    {
-        _kitBusy = busy;
-        foreach (var panel in _panels) panel.SetBusy(busy);
-        _btnLoadPreset.Enabled = !busy && _cmbPresets.Items.Count > 0;
-        _btnPresetFile.Enabled = !busy;
-    }
-
     private static string SampleText(PreparedPiece piece) => piece.Samples is null
         ? "nenhum sample"
         : $"{piece.Name} ({piece.Samples.Length * 1000.0 / EngineRate:0} ms)";
 
-    private void ShowPieceErrors(KitPrepareResult r)
+    private void ShowPieceErrors(IReadOnlyList<PieceLoadError> errors)
     {
-        foreach (var e in r.Errors)
+        foreach (var e in errors)
         {
             Log("ERRO: " + e.Message);
             _panels[(int)e.Piece].SetSampleText("erro: " + e.Message, isError: true);
         }
-    }
-
-    private void LogNotes(KitPrepareResult r)
-    {
-        foreach (var n in r.Notes) Log("Aviso: " + n);
     }
 
     private static string? Prompt(string title, string label, string initial)
@@ -505,15 +479,19 @@ public sealed class MainForm : Form
     /// Synthetic kit of the simulation scenario: its samples (one ApplyKit) and the per-piece detection that matches
     /// it, shown in the panels. Not written to the configuration (the operator's own samples/settings stay saved).
     /// </summary>
-    private void LoadSyntheticKit(int seed)
+    private async Task LoadSyntheticKitAsync(int seed)
     {
         StartupOptions.SimulationSeed = seed;
         var kit = StartupOptions.SimulationKit();
         var settings = StartupOptions.SimulationKitSettings();
-        _kit.ApplyKit(kit);
+        var r = await _controller.ApplyKit(kit, settings).Completion;
+        if (r.Status != KitOperationStatus.Applied)
+        {
+            Log($"Kit sintético não aplicado ({r.Status}).");
+            return;
+        }
         foreach (var p in DrumPieces.All)
         {
-            _kit.UpdatePieceSettings(p, settings[p]);
             _panels[(int)p].ShowSettings(settings[p]);
             _panels[(int)p].SetSampleText(SampleText(kit[p]) + " [sintético]");
         }
@@ -779,6 +757,8 @@ public sealed class MainForm : Form
     {
         _uiTimer.Stop();
         DisposeHost();
+        // The controller worker never touches the UI, so waiting here cannot deadlock.
+        _controller.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(2));
         SaveConfig();
     }
 }

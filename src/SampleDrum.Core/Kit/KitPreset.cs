@@ -18,6 +18,7 @@ public sealed record KitPreset
     public string Name { get; init; } = "";
 
     /// <summary>Stable file identity, independent of the display name. Load always uses the file name without .json.</summary>
+    [JsonIgnore]
     public string? Id { get; init; }
 
     /// <summary>Pieces present in the preset; a missing piece means "no sample" for that piece.</summary>

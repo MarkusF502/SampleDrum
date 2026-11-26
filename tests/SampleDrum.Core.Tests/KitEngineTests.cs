@@ -394,6 +394,15 @@ public class KitEngineTests
         }
 
         Pass(measure: false);                    // JIT warm-up of every path
-        Assert.Equal(0, Pass(measure: true));
+        // Under a loaded parallel test run, tier-up/OSR compilation can still happen on this thread during an early
+        // measured pass (a one-time few-KB cost). A real allocation in Process would repeat in EVERY pass (~3000
+        // blocks), so require one complete pass with exactly zero bytes.
+        var passes = new List<long>();
+        for (int attempt = 0; attempt < 5; attempt++)
+        {
+            passes.Add(Pass(measure: true));
+            if (passes[^1] == 0) break;
+        }
+        Assert.True(passes[^1] == 0, "bytes alocados por passada: " + string.Join(", ", passes));
     }
 }

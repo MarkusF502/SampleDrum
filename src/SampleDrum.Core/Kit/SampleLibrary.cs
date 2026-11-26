@@ -161,7 +161,9 @@ public sealed class SampleLibrary
             var prepared = PreparedPiece.Empty(piece);
             if (samplePath is { Length: > 0 } && !TryLoad(piece, samplePath, current.SampleRate, errors, notes, out prepared))
                 return new KitPrepareResult(null, errors, notes);
-            return new KitPrepareResult(current.SamplesOnly().WithPiece(prepared), errors, notes);
+            // A single-piece change is a custom selection: the result no longer represents a preset (PresetId null).
+            var changed = current.SamplesOnly().WithPiece(prepared);
+            return new KitPrepareResult(new PreparedKit(changed.Name, changed.SampleRate, changed.Pieces, null), errors, notes);
         }, ct);
     }
 

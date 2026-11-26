@@ -85,26 +85,123 @@ public sealed class PanelControllerTests : IDisposable
     }
 
     [Fact]
-    public async Task NewPieceSupersedesOlderWholePreset_AndSamePiecePendingWork()
+    public async Task NewPieceNeverCancelsAPendingPreset_ButSupersedesSamePiecePendingWork()
     {
+        // The operator applies a preset and, while it is still preparing, changes the snare twice: the preset must
+        // still be applied (its kick/tom/floor tom would otherwise be lost), the first snare change is superseded by
+        // the second, and the final snare is the last request.
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var engine = new KitEngine(Fs, KitSettings.Default);
         var library = new SampleLibrary(_dir);
         async Task<KitPrepareResult> Prepare(KitPreset p, int rate, CancellationToken ct)
-        { entered.SetResult(); await release.Task.WaitAsync(ct); return await library.PrepareAsync(p, rate, ct); }
+        { entered.TrySetResult(); await release.Task.WaitAsync(ct); return await library.PrepareAsync(p, rate, ct); }
         await using var controller = new KitController(engine, library, Prepare);
         var preset = controller.ApplyPreset(Preset("old", "a.wav"));
         await entered.Task.WaitAsync(TimeSpan.FromSeconds(15));
         var first = controller.SetPieceSample(DrumPiece.Snare, "a.wav");
         var second = controller.SetPieceSample(DrumPiece.Snare, "b.wav");
         release.SetResult();
-        Assert.Equal(KitOperationStatus.Superseded, (await Done(preset)).Status);
+        Assert.Equal(KitOperationStatus.Applied, (await Done(preset)).Status);
         Assert.Equal(KitOperationStatus.Superseded, (await Done(first)).Status);
         Assert.Equal(KitOperationStatus.Applied, (await Done(second)).Status);
-        Assert.Equal(1, controller.Version);
-        Assert.Null(controller.Snapshot.Pieces[0].SamplePath);
-        Assert.Equal("b.wav", controller.Snapshot.Pieces[1].SampleId);
+        Assert.Equal(2, controller.Version);
+        var state = controller.Snapshot;
+        Assert.Equal("a.wav", state.Pieces[0].SampleId);
+        Assert.Equal("b.wav", state.Pieces[1].SampleId);
+        Assert.Equal("a.wav", state.Pieces[2].SampleId);
+        Assert.Equal("a.wav", state.Pieces[3].SampleId);
+        Assert.Null(state.ActivePresetId);                 // custom selection after a single-piece change
+    }
+
+    [Theory]
+    [InlineData(KitOperationKind.Preset, null, KitOperationKind.Preset, null, true)]
+    [InlineData(KitOperationKind.Preset, null, KitOperationKind.PieceSample, DrumPiece.Tom, true)]
+    [InlineData(KitOperationKind.PreparedKit, null, KitOperationKind.Preset, null, true)]
+    [InlineData(KitOperationKind.Preset, null, KitOperationKind.PieceEnabled, DrumPiece.Tom, false)]
+    [InlineData(KitOperationKind.Preset, null, KitOperationKind.PieceGain, DrumPiece.Tom, false)]
+    [InlineData(KitOperationKind.Preset, null, KitOperationKind.KitEnabled, null, false)]
+    [InlineData(KitOperationKind.PieceSample, DrumPiece.Kick, KitOperationKind.Preset, null, false)]
+    [InlineData(KitOperationKind.PieceSample, DrumPiece.Kick, KitOperationKind.PieceSample, DrumPiece.Kick, true)]
+    [InlineData(KitOperationKind.PieceSample, DrumPiece.Kick, KitOperationKind.PieceSample, DrumPiece.Snare, false)]
+    [InlineData(KitOperationKind.PieceSample, DrumPiece.Kick, KitOperationKind.PieceGain, DrumPiece.Kick, false)]
+    [InlineData(KitOperationKind.PieceGain, DrumPiece.Kick, KitOperationKind.PieceGain, DrumPiece.Kick, true)]
+    [InlineData(KitOperationKind.PieceGain, DrumPiece.Kick, KitOperationKind.PieceSettings, DrumPiece.Kick, false)]
+    [InlineData(KitOperationKind.PieceSettings, DrumPiece.Kick, KitOperationKind.PieceGain, DrumPiece.Kick, true)]
+    [InlineData(KitOperationKind.PieceSettings, DrumPiece.Kick, KitOperationKind.PieceSettings, DrumPiece.Snare, false)]
+    [InlineData(KitOperationKind.PieceEnabled, DrumPiece.Tom, KitOperationKind.PieceEnabled, DrumPiece.Tom, true)]
+    [InlineData(KitOperationKind.KitEnabled, null, KitOperationKind.KitEnabled, null, true)]
+    [InlineData(KitOperationKind.KitEnabled, null, KitOperationKind.PieceEnabled, DrumPiece.Kick, false)]
+    public void SupersedeRule_IsDirectional_NewerMustCoverOlder(KitOperationKind newer, DrumPiece? newerPiece,
+        KitOperationKind older, DrumPiece? olderPiece, bool expected)
+    {
+        static KitOperationSnapshot Op(KitOperationKind k, DrumPiece? p) =>
+            new(Guid.NewGuid(), k, p, KitOperationStatus.Queued, [], null);
+        Assert.Equal(expected, KitController.Supersedes(Op(newer, newerPiece), Op(older, olderPiece)));
+    }
+
+    [Fact]
+    public async Task PendingEnableAndGain_SurviveALaterPreset()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var engine = new KitEngine(Fs, KitSettings.Default);
+        var library = new SampleLibrary(_dir);
+        async Task<KitPrepareResult> Prepare(KitPreset p, int rate, CancellationToken ct)
+        { if (p.Id == "slow") { entered.TrySetResult(); await release.Task.WaitAsync(ct); } return await library.PrepareAsync(p, rate, ct); }
+        await using var controller = new KitController(engine, library, Prepare);
+        var slow = controller.ApplyPreset(Preset("slow", "a.wav"));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        var disable = controller.SetPieceEnabled(DrumPiece.Tom, false);
+        var gain = controller.SetPieceGain(DrumPiece.Tom, -6f);
+        var latest = controller.ApplyPreset(Preset("latest", "b.wav"));
+        release.SetResult();
+        Assert.Equal(KitOperationStatus.Superseded, (await Done(slow)).Status);
+        Assert.Equal(KitOperationStatus.Applied, (await Done(disable)).Status);
+        Assert.Equal(KitOperationStatus.Applied, (await Done(gain)).Status);
+        Assert.Equal(KitOperationStatus.Applied, (await Done(latest)).Status);
+        Assert.False(engine.IsPieceEnabled(DrumPiece.Tom));
+        Assert.Equal(-6f, engine.Settings[DrumPiece.Tom].OutputGainDb);
+        Assert.Equal("latest", controller.Snapshot.ActivePresetId);
+    }
+
+    [Fact]
+    public async Task ApplyPreparedKitWithSettings_AndPieceSettings_GoThroughTheController()
+    {
+        var engine = new KitEngine(Fs, KitSettings.Default);
+        await using var controller = new KitController(engine, new SampleLibrary(_dir));
+        var kit = KitTestUtil.DcKit(16, 0.1f, 0.2f, 0.3f, 0.4f);
+        var settings = KitSettings.Default.With(DrumPiece.Tom, PieceSettings.DefaultFor(DrumPiece.Tom) with { OutputGainDb = -2f });
+        Assert.Equal(KitOperationStatus.Applied, (await Done(controller.ApplyKit(kit, settings))).Status);
+        Assert.Same(kit, engine.ActiveKit);
+        Assert.Equal(-2f, engine.Settings[DrumPiece.Tom].OutputGainDb);
+
+        var snare = PieceSettings.DefaultFor(DrumPiece.Snare) with { Trigger = KitDefaults.Snare.WithThreshold(-12f) };
+        Assert.Equal(KitOperationStatus.Applied, (await Done(controller.SetPieceSettings(DrumPiece.Snare, snare))).Status);
+        Assert.Equal(-12f, engine.Settings[DrumPiece.Snare].Trigger.ThresholdDb);
+        Assert.Equal(-12f, controller.Snapshot.Pieces[1].Settings.Trigger.ThresholdDb);
+
+        var wrongRate = await Done(controller.ApplyKit(PreparedKit.Empty(44100)));
+        Assert.Equal(KitOperationStatus.Failed, wrongRate.Status);
+        Assert.Same(kit, engine.ActiveKit);
+        Assert.Equal(2, controller.Version);
+    }
+
+    [Fact]
+    public async Task OperationHistory_IsBounded()
+    {
+        var engine = new KitEngine(Fs, KitSettings.Default);
+        await using var controller = new KitController(engine, new SampleLibrary(_dir));
+        var ops = new List<KitOperation>();
+        for (int i = 0; i < KitController.OperationHistory + 50; i++)
+        {
+            var op = controller.SetPieceGain(DrumPiece.Kick, -(i % 10));
+            ops.Add(op);
+            await Done(op);                                   // one at a time: none superseded
+        }
+        Assert.Null(controller.GetOperation(ops[0].Id));
+        Assert.NotNull(controller.GetOperation(ops[^1].Id));
+        Assert.Equal(KitOperationStatus.Applied, ops[0].Snapshot.Status); // the handle itself keeps its result
     }
 
     [Fact]

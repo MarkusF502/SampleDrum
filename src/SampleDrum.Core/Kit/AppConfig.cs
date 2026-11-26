@@ -3,6 +3,7 @@ using System.Text.Json.Serialization;
 
 namespace SampleDrum.Core.Kit;
 
+/// <summary>A phone paired with the remote panel. Only the SHA-256 of its token is stored, never the token.</summary>
 public sealed class PairedDeviceConfig
 {
     public string Name { get; set; } = "";
@@ -11,10 +12,16 @@ public sealed class PairedDeviceConfig
     public DateTimeOffset? LastSeenUtc { get; set; }
 }
 
+/// <summary>
+/// Phone control panel settings (schema only in v2: no server runs yet). Off by default; the phone test button is
+/// off by default too. Ports below 1024 or above 65535 are reset to <see cref="DefaultPort"/>.
+/// </summary>
 public sealed class RemotePanelConfig
 {
+    public const int DefaultPort = 8750;
+
     public bool Enabled { get; set; }
-    public int Port { get; set; } = 8750;
+    public int Port { get; set; } = DefaultPort;
     public bool AllowPhoneTest { get; set; }
     public List<PairedDeviceConfig> PairedDevices { get; set; } = [];
 }
@@ -73,7 +80,10 @@ public sealed class AppConfig
     /// <summary>Samples folder; null = %AppData%\SampleDrum\Samples.</summary>
     public string? SamplesFolder { get; set; }
 
+    /// <summary>Phone control panel (schema only; see <see cref="RemotePanelConfig"/>).</summary>
     public RemotePanelConfig RemotePanel { get; set; } = new();
+
+    /// <summary>Id (file name) of the last preset applied as a whole; null after a single-piece change.</summary>
     public string? ActivePresetId { get; set; }
 
     /// <summary>Default folder: %AppData%\SampleDrum.</summary>
@@ -171,6 +181,8 @@ public sealed class AppConfig
     {
         RemotePanel ??= new();
         RemotePanel.PairedDevices ??= [];
+        RemotePanel.PairedDevices.RemoveAll(d => d is null || string.IsNullOrWhiteSpace(d.TokenSha256Hex));
+        if (RemotePanel.Port is < 1024 or > 65535) RemotePanel.Port = RemotePanelConfig.DefaultPort;
         SettingsVersion = CurrentVersion;
         var pieces = new List<PieceConfig>();
         foreach (var p in DrumPieces.All)

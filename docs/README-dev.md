@@ -249,6 +249,45 @@ do vazamento; passa-altas abaixo da fundamental da peça). Todos precisam de cal
 | Tom | −20 / −26 dBFS | 60 Hz | 15 ms / 15 ms | 30 ms | — | fundamental 100-150 Hz (7-10 ms); microfone ouve o kit inteiro e o tom toca pouco |
 | Surdo | −16 / −22 dBFS | 50 Hz | 20 ms / 15 ms | 30 ms | — | fundamental 70-100 Hz (10-14 ms), perto do bumbo; o bumbo vaza forte no microfone do surdo: no cenário do harness um bumbo de −3 dBFS vazando a −18 dB (≈ −21 dBFS) disparava −22; −16 deixa 5 dB de folga sobre o vazamento e 10 dB sob os golpes suaves (−6 dBFS). O cenário usa estes padrões sem exceção. |
 
+## API para o painel (Core, `SampleDrum.Core.Kit`)
+
+Base para o painel no celular (o servidor e a interface do celular ficam para a próxima entrega; ver
+`docs/research/painel-movel.md`). A janela do PC já usa o mesmo caminho.
+
+- **`KitController`** — caminho único para mudar o kit (PC e, depois, o painel). Fila serializada: cada pedido vira
+  uma `KitOperation` com `Id`, `Status` (`Queued`, `Preparing`, `Applied`, `Failed`, `Superseded`), erros por peça e
+  `Completion` (Task). Operações: `SetPieceSample(peça, id)` (id **não confiável**, do painel), `SetPieceSamplePath`
+  (caminho do seletor de arquivos do PC), `ApplyPreset` (kit inteiro de uma vez), `ApplyKit(PreparedKit, KitSettings?)`
+  (kit já preparado, ex.: o sintético), `SetPieceSettings`, `SetPieceGain`, `SetPieceEnabled`, `SetKitEnabled`.
+  - A preparação (ler/reamostrar WAV) roda fora da thread de áudio; só um kit completo chega ao motor
+    (`KitEngine.ApplyKit`, uma troca no início do bloco). Preparação que falha não muda nada.
+  - **`Version`** sobe 1 a cada operação aplicada; **`Snapshot`** traz por peça id/caminho do sample, ganho, ativa e
+    ajustes, mais kit ativo e `ActivePresetId`. **`StateChanged`** é disparado na thread do controlador (nunca na de
+    áudio): quem é UI precisa repassar para a própria thread.
+  - **Último pedido vence, mas só sobre o que ele cobre**: kit inteiro (preset/kit preparado) cancela kits inteiros e
+    trocas de sample pendentes; troca de sample de uma peça cancela só trocas pendentes **da mesma peça** (nunca um
+    preset pendente, cujas outras peças se perderiam); ganho/ajustes/ativa/kit ligado cancelam só o mesmo tipo do mesmo
+    alvo. Operações canceladas (`Superseded`) nunca tocam o motor, mesmo se já estavam preparando.
+  - Guarda o estado das últimas 256 operações terminadas (`GetOperation`); o objeto `KitOperation` continua válido.
+  - Quem usa o controlador não deve mudar o motor direto (exceto `RequestTest`, medidores e `Reset` com o áudio parado).
+- **`SampleLibrary`**: `SampleInfo.Id` = caminho relativo à pasta de samples com `/`. **`TryResolveInLibrary(id)`**
+  rejeita caminhos absolutos, letra de drive, UNC, `..`, `.`, segmentos vazios, streams alternativos (`:`), nomes de
+  dispositivo (`NUL`, `COM1`...) e junções/links simbólicos abaixo da pasta. Entrada remota **sempre** passa por ele;
+  `ResolvePath` (aceita caminhos absolutos) é só para o seletor de arquivos do PC.
+- **`PieceLoadError.Code`**: `FileNotFound`, `UnsupportedFormat`, `TooLong`, `OutsideLibrary`, `IoError` (estável,
+  para o painel), além da mensagem em português.
+- **Presets**: `KitPreset.Id` = nome do arquivo sem `.json` (não é gravado no JSON; nomes repetidos não colidem);
+  `PreparedKit.PresetId` vem do preset e fica `null` depois de trocar uma peça só (seleção personalizada).
+- **`KitEngine`**: `ApplyKit` com taxa diferente falha na hora; `ActiveKit` = último kit enviado (também com o áudio
+  parado); `Reset()` mantém (aplica) um kit pendente; `AppliedKitGeneration` mostra que a thread de áudio já pegou a
+  troca. **`TryDequeueEvent` e `ReadAndResetInputPeak` têm um único consumidor**: o app lê e repassa para a janela e,
+  no futuro, para o painel.
+- **`AppConfig`**: `RemotePanel { Enabled = false, Port = 8750, AllowPhoneTest = false, PairedDevices[{ Name,
+  TokenSha256Hex, PairedAtUtc, LastSeenUtc }] }` (só o esquema; guarda o hash do token, nunca o token; porta fora de
+  1024-65535 volta a 8750) e `ActivePresetId`. `SamplePath` dentro da pasta de samples é gravado relativo (`kicks/k1.wav`)
+  e volta absoluto ao carregar; fora dela fica absoluto. `Save` grava uma cópia (snapshot) num arquivo temporário e move
+  por cima (atômico); `Save(caminho, KitStateSnapshot)` grava o estado do controlador sem mexer na configuração em memória.
+
 ## Contrato com o app (thread de áudio)
 
 - `TriggerEngine.Process(input, output)`: thread de áudio; não aloca, não trava, não faz log/IO. `output`
