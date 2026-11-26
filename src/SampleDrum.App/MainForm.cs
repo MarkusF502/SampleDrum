@@ -58,6 +58,8 @@ public sealed class MainForm : Form
     };
     private readonly NumericUpDown _nudHighPass = Box(0, 2000, 0, 5m);
     private readonly NumericUpDown _nudDetect = Box(0, 20, 1, 0.1m);
+    private readonly NumericUpDown _nudScan = Box(0, 50, 1, 0.5m);
+    private readonly Label _lblTriggerDelay = Lbl("");
     private readonly NumericUpDown _nudRearmTime = Box(0, 1000, 0, 1m);
     private readonly NumericUpDown _nudRetrigger = Box(0, 48, 1, 0.5m);
     private readonly NumericUpDown _nudVelRange = Box(1, 120, 1, 1m);
@@ -164,6 +166,7 @@ public sealed class MainForm : Form
                 Lbl("  Tempo de detecção (ms)"), _nudDetect),
             Row(Lbl("Tempo de rearme (ms)"), _nudRearmTime,
                 Lbl("  Redisparo por subida (dB, 0 = desligado)"), _nudRetrigger),
+            Row(Lbl("Janela de velocidade (ms)"), _nudScan, _lblTriggerDelay),
             Row(Lbl("Faixa de velocidade (dB)"), _nudVelRange, Lbl("  Ganho mínimo (dB)"), _nudMinGain),
             Row(_chkFixedVelocity, _btnDefaults),
         ]);
@@ -196,6 +199,7 @@ public sealed class MainForm : Form
             SetNud(_nudInterval, s.MinIntervalMs);
             SetNud(_nudHighPass, s.HighPassHz);
             SetNud(_nudDetect, s.DetectTimeMs);
+            SetNud(_nudScan, s.ScanMs);
             SetNud(_nudRearmTime, s.RearmTimeMs);
             SetNud(_nudRetrigger, s.RetriggerRiseDb);
             SetNud(_nudVelRange, s.VelocityRangeDb);
@@ -204,6 +208,15 @@ public sealed class MainForm : Form
         }
         finally { _loadingUi = false; }
         UpdateMeterMarkers();
+        UpdateTriggerDelayLabel();
+    }
+
+    /// <summary>The sample starts max(detection time, velocity window) after the crossing: show that cost.</summary>
+    private void UpdateTriggerDelayLabel()
+    {
+        decimal delay = Math.Max(_nudDetect.Value, _nudScan.Value);
+        _lblTriggerDelay.Text = $"atraso do disparo = {delay:0.0} ms (maior entre detecção e janela; " +
+                                "janela maior = velocidade mais fiel, mais latência)";
     }
 
     private void UpdateAdvancedUi()
@@ -242,8 +255,8 @@ public sealed class MainForm : Form
         _btnTest.Click += (_, _) => TestSample();
         _btnEnable.Click += (_, _) => { _engine.Enabled = !_engine.Enabled; UpdateEnabledUi(); };
         _nudThreshold.ValueChanged += (_, _) => OnThresholdChanged();
-        foreach (var nud in new[] { _nudRearm, _nudInterval, _nudHighPass, _nudDetect, _nudRearmTime, _nudRetrigger,
-                                    _nudVelRange, _nudMinGain })
+        foreach (var nud in new[] { _nudRearm, _nudInterval, _nudHighPass, _nudDetect, _nudScan, _nudRearmTime,
+                                    _nudRetrigger, _nudVelRange, _nudMinGain })
             nud.ValueChanged += (_, _) => ApplyTriggerSettings();
         _chkFixedVelocity.CheckedChanged += (_, _) => ApplyTriggerSettings();
         _chkAdvanced.CheckedChanged += (_, _) => UpdateAdvancedUi();
@@ -313,6 +326,7 @@ public sealed class MainForm : Form
             MinIntervalMs = (float)_nudInterval.Value,
             HighPassHz = (float)_nudHighPass.Value,
             DetectTimeMs = (float)_nudDetect.Value,
+            ScanMs = (float)_nudScan.Value,
             RearmTimeMs = (float)_nudRearmTime.Value,
             RetriggerRiseDb = (float)_nudRetrigger.Value,
             VelocityRangeDb = (float)_nudVelRange.Value,
@@ -320,6 +334,8 @@ public sealed class MainForm : Form
             FixedVelocity = _chkFixedVelocity.Checked,
         });
         UpdateMeterMarkers();
+        UpdateTriggerDelayLabel();
+        UpdateLatencyLabel();
     }
 
     private void RestoreDefaults()
@@ -329,6 +345,7 @@ public sealed class MainForm : Form
         _engine.UpdateSettings(d);
         Log($"Padrões do detector restaurados: limiar {d.ThresholdDb:0.0} dBFS, rearme {d.RearmDb:0.0} dBFS, " +
             $"intervalo {d.MinIntervalMs:0} ms, passa-altas {d.HighPassHz:0} Hz, detecção {d.DetectTimeMs:0.0} ms, " +
+            $"janela de velocidade {d.ScanMs:0.0} ms, " +
             $"tempo de rearme {d.RearmTimeMs:0} ms, redisparo {d.RetriggerRiseDb:0.0} dB, faixa {d.VelocityRangeDb:0} dB, " +
             $"ganho mínimo {d.MinGainDb:0} dB, velocidade {(d.FixedVelocity ? "fixa" : "variável")}.");
     }
@@ -387,6 +404,9 @@ public sealed class MainForm : Form
             if (!_sampleLoaded) Log("AVISO: nenhum sample carregado; o retorno ficará em silêncio.");
 
             _host?.Dispose();
+            // A previous run may have been stopped mid-voice/mid-detection: start from a clean engine state
+            // (no audio thread is running at this point).
+            _engine.Reset();
             if (IsSimulationSelected)
             {
                 _host = new FakeAudioHost(_engine, EngineRate);

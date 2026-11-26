@@ -39,14 +39,14 @@ onset reportado (±2 ms quando o passa-baixas está ligado, por causa do atraso 
 | 3 | Golpe suprimido com sustain longo | não dispara "atrasado" quando a trava termina |
 | 4 | Fronteira de bloco | blocos 1/7/32/61/64/127/128/256/480/512/1000/1024: eventos **e saída idênticos** ao buffer inteiro, golpe detectado 1 vez na amostra certa |
 | 4 | Faixa sintética completa | os 10 golpes casados, para vários tamanhos de bloco |
-| 5 | Velocity | −30/−18/−6 dBFS crescentes; ganho dentro de `[MinGainDb, 0 dB]`; satura em 1 acima de limiar + `VelocityRangeDb`; monotônica em passos finos; `FixedVelocity` → 0 dB |
+| 5 | Velocity | −30/−18/−6 dBFS crescentes; ganho dentro de `[MinGainDb, 0 dB]`; satura em 1 acima de limiar + `VelocityRangeDb`; monotônica em passos finos; `FixedVelocity` → 0 dB; segue o mapeamento em dB do nível real (±0,05) para bumbo com e sem clique, com e sem passa-baixas; bumbo sem clique de 55 Hz: ±0,15 com 2 ms e ±0,05 com 3 ms |
 | 6 | Ressonância e vazamento | ringing de 50 Hz contínuo abaixo do limiar: nada; caixa 20 dB abaixo do bumbo: nada; vazamento **acima** do limiar dispara sem filtro e é rejeitado com `LowPassHz = 150` (bumbos ainda detectados) |
 | 7 | Clique isolado de 1-2 amostras | rejeitado pelo detect time; aceito com `DetectTimeMs = 0`; não atrapalha um golpe real 10 ms depois |
-| 8 | Latência | o sample começa em onset + `max(DetectTimeMs, ScanMs)`, ≤ detect time + 1 amostra com os padrões; com tudo em 0 começa na amostra do cruzamento, no mesmo bloco |
+| 8 | Latência | o sample começa em onset + `max(DetectTimeMs, ScanMs)` (≤ janela + 1 amostra; 2 ms com os padrões); com tudo em 0 começa na amostra do cruzamento, no mesmo bloco |
 | 9 | Sequência rápida além de `MaxVoices` | 8 golpes a 45 ms com 2 vozes: sem degrau/clique (roubo com fade) e **zero alocação** |
-| — | Motor | desabilitado = silêncio exato; teste manual toca mesmo desabilitado; ajustes aplicados no bloco seguinte sem disparo espúrio; fila de eventos; medidor de pico; `Process` não aloca |
+| — | Motor | desabilitado = silêncio exato; teste manual toca mesmo desabilitado; ajustes aplicados no bloco seguinte sem disparo espúrio (inclusive no meio do DETECT: a janela é congelada no cruzamento); fila de eventos; medidor de pico; `Process` não aloca; `Reset()` impede que uma voz cortada pelo "Parar" volte no próximo "Iniciar"; estados dos filtros chegam a 0 exato no silêncio (sem denormais); NaN/infinito na entrada ou no sample não chegam à saída; pool cheio nunca corta uma voz que está tocando |
 | — | ChannelMap | USB 3 → índice 2, USB 1 → índice 0, fora da faixa é rejeitado |
-| — | WAV | ida e volta float/PCM24/PCM16, estéreo → mono, chunks extras, reamostragem 44,1k/96k → 48k |
+| — | WAV | ida e volta float/PCM24/PCM16, estéreo → mono, seleção de canal, chunks extras, WAVE_FORMAT_EXTENSIBLE (PCM24 e float), chunk `fmt ` curto rejeitado, NaN/infinito trocados por 0 e contados, reamostragem 44,1k/96k → 48k |
 
 ## Modo offline com dados sintéticos
 
@@ -83,7 +83,8 @@ onset reportado (±2 ms quando o passa-baixas está ligado, por causa do atraso 
    ... --block 480                 # outro tamanho de bloco (o resultado deve ser idêntico)
    ... --min-interval-ms 150       # trava maior que o espaçamento dos golpes próximos: o 2º sai PERDIDO
    ... --detect-ms 0               # sem debounce (latência mínima, cliques isolados passam)
-   ... --scan-ms 2                 # velocity pelo pico real do golpe, +1,5 ms de latência
+   ... --scan-ms 3                 # bumbo sem clique/muito grave: velocity mais fiel, +1 ms de latência
+   ... --scan-ms 0                 # menor latência (0,5 ms), velocity subestimada
    ... --lpf-hz 150                # rejeitar vazamento de caixa/tons
    ... --retrigger-db 0            # comportamento parecido com o LSP (sem redisparo no sustain)
    ... --channel 2                 # usa só a faixa 2 de um WAV multicanal (padrão: média das faixas)
@@ -106,7 +107,7 @@ Reimplementação própria a partir do comportamento descrito em `docs/research/
 (LSP Trigger, de lsp-plug.in). O LSP é **LGPL-3**: nenhum código dele foi copiado ou traduzido; ele é só
 referência de comportamento. Diferenças principais em relação ao LSP: envelope *peak-hold* em vez de RMS,
 **intervalo mínimo absoluto** e **redisparo por subida** durante o sustain (o LSP não tem nenhum dos dois),
-velocity pelo pico da janela e índice de amostra absoluto nos eventos.
+velocity pelo pico da entrada **sem filtro** na janela e índice de amostra absoluto nos eventos.
 
 Caminho do sinal (mesmo código ao vivo e offline, amostra por amostra, estado guardado entre blocos):
 
@@ -125,7 +126,9 @@ Máquina de estados `OFF → DETECT → ON → RELEASE → OFF`:
   depois). Senão, vai para DETECT.
 - **DETECT**: janela de `max(DetectTimeMs, ScanMs)` amostras a partir do onset. Depois de `DetectTimeMs`,
   a média quadrática de |y| na janela precisa atingir o limiar (*debounce*); se não atingir, era um pico
-  isolado → volta a OFF sem mexer na trava. No fim da janela dispara, com a velocity do pico da janela → ON.
+  isolado → volta a OFF sem mexer na trava. No fim da janela dispara, com a velocity do pico da entrada
+  **sem filtro** na janela → ON. Os tamanhos da janela são congelados no cruzamento (uma troca de ajustes no
+  meio do DETECT não pula o debounce).
 - **ON → RELEASE** quando o envelope cai a `RearmDb`; **RELEASE → ON** se subir de novo;
   **RELEASE → OFF** (rearmado) depois de `RearmTimeMs` abaixo dele.
 - **Redisparo** (em ON/RELEASE): depois da trava, se o envelope subir `RetriggerRiseDb` acima do seu mínimo
@@ -150,7 +153,7 @@ ganhoDb  = (1 − velocity) · MinGainDb + OutputGainDb                    (Fixe
 | `RearmTimeMs` | 15 ms | pesquisa; > meio período da fundamental |
 | `MinIntervalMs` | 35 ms | trava absoluta da pesquisa; abaixo das duplas mais rápidas reais com folga |
 | `RetriggerRiseDb` | 9 dB | pesquisa; maior que a ondulação do envelope (~4 dB a 55 Hz, ~5,4 dB a 40 Hz) |
-| `ScanMs` | 0 (= só o detect time) | menor latência (0,5 ms no total). Ver compromisso abaixo |
+| `ScanMs` | 2 ms | medido: erro de velocity ≤ 0,1 dB em bumbos com clique ou varredura de pitch; 2 ms de atraso no total. Ver tabela abaixo |
 | `EnvelopeReleaseMs` | 20 ms | > 1 período de 50 Hz |
 | `HighPassHz` | 40 Hz | tira ronco/vibração de palco sem tocar na fundamental do bumbo |
 | `LowPassHz` | desligado | ligar em 150-250 Hz só se o vazamento de caixa/tons disparar (adiciona ~1 ms de atraso) |
@@ -160,15 +163,38 @@ ganhoDb  = (1 − velocity) · MinGainDb + OutputGainDb                    (Fixe
 
 ### Compromisso latência × velocity (janela de varredura)
 
-O cruzamento do limiar acontece no início do ataque. Com `ScanMs = 0` a velocity é medida nos 0,5 ms do
-detect time, ou seja, na **subida** do golpe e não no pico. Ela continua **monotônica** com a força do
-golpe (golpes com o mesmo formato sobem proporcionalmente), mas lê alguns dB abaixo do pico real: no bumbo
-sintético, um golpe de −3 dBFS mede ≈ −9 dBFS. Por isso:
+O cruzamento do limiar acontece no início do ataque; o pico real do golpe chega depois. A velocity é o pico
+de |x| da **entrada sem filtro** durante `max(DetectTimeMs, ScanMs)` a partir do cruzamento. (Medir depois do
+passa-altas de 40 Hz subestimava até ~7 dB: o filtro encolhe o primeiro meio-ciclo de um bumbo grave, e uma
+janela maior não recupera isso. Os filtros continuam valendo para a **detecção**.)
 
-- calibre `VelocityRangeDb` pelo **pico medido** que o modo offline imprime (golpe forte medido − limiar);
-- ou use `ScanMs = 1-2 ms` para medir o pico real, pagando exatamente esse atraso a mais;
-- `DetectTimeMs = 0` e `ScanMs = 0` disparam na amostra do cruzamento (latência zero adicional), mas
-  aceitam cliques isolados e a velocity fica perto do limiar (use `FixedVelocity`).
+Erro do pico medido em relação ao nível real do golpe (dB), limiar −24 dBFS, faixa 24 dB, 48 kHz
+(gerado com `SyntheticSignals`; "com clique" = ruído de baqueta + seno 120→50 Hz; "sem clique" = só o seno,
+começando na fase 0):
+
+| Bumbo (nível) | 0 ms | 1 ms | 2 ms | 3 ms | 5 ms |
+|---|---|---|---|---|---|
+| com clique, 0 / −6 / −12 dBFS | −5,9 | −3,3 | −0,1 | 0,0 | 0,0 |
+| sem clique 120→50 Hz, 0 dBFS | −7,4 | −2,9 | 0,0 | 0,0 | 0,0 |
+| sem clique 120→50 Hz, −12 dBFS | −4,5 | −1,5 | 0,0 | 0,0 | 0,0 |
+| sem clique 55 Hz, 0 dBFS | −12,6 | −7,9 | −3,2 | −0,9 | 0,0 |
+| sem clique 55 Hz, −12 dBFS | −6,9 | −4,4 | −1,5 | −0,2 | 0,0 |
+| sem clique 55 Hz, 0 dBFS, passa-baixas 150 Hz | −4,6 | −2,8 | −0,8 | 0,0 | 0,0 |
+
+(1 dB de erro ≈ 0,04 de velocity com faixa de 24 dB.) Por isso o padrão é **2 ms**: bumbos com ataque de
+baqueta ou varredura de pitch ficam dentro de 0,1 dB; para um bumbo muito grave e sem ataque, use 3 ms.
+A janela aparece no app em **Avançado → Janela de velocidade (ms)**, com o atraso resultante ao lado.
+
+- `ScanMs = 0`: só os 0,5 ms do detect time (menor latência), mas a velocity lê 6-13 dB abaixo.
+- `DetectTimeMs = 0` e `ScanMs = 0`: dispara na amostra do cruzamento, aceita cliques isolados e a velocity
+  fica perto do limiar (use `FixedVelocity`).
+
+**Por que não "começar no detect time e só subir o ganho durante a janela"** (velocity sem a latência da
+janela): no detect time o pico parcial ainda está 6-13 dB abaixo do real (coluna 0 ms acima). Com
+`MinGainDb = −20`, o **ataque do sample** (os primeiros ~1,5 ms, justamente a parte mais importante do bumbo)
+tocaria 5-11 dB baixo e subiria em rampa até o ganho certo. Não gera clique, mas amacia o ataque de forma
+audível e diferente a cada golpe, então não foi adotado. Se 1,5 ms a mais for problema no ensaio, reduza
+`ScanMs` e aceite velocity menos fiel (ou use `FixedVelocity`).
 
 A latência total ao vivo = latência de entrada ASIO + `max(DetectTimeMs, ScanMs)` + latência de saída ASIO.
 É fixa e determinística, então dá para compensar com delay no canal do microfone na mesa, se preciso.
@@ -190,6 +216,11 @@ A latência total ao vivo = latência de entrada ASIO + `max(DetectTimeMs, ScanM
   do próximo bloco. Coeficientes são calculados em `UpdateSettings`, não no áudio. O array passado em
   `SetSample` passa a pertencer ao motor (não modifique depois). Use `WavFile.ReadMonoAtRate` para carregar.
 - `RequestTest(gain)`: qualquer thread; toca no início do próximo bloco, mesmo com `Enabled = false`.
+- `Reset()`: só com o áudio parado (o app chama antes de cada "Iniciar áudio"): limpa vozes, detector,
+  filtros, trava e teste pendente; mantém sample, ajustes, `Enabled` e o contador absoluto de amostras.
+- NaN/infinito: `SetSample` e `WavFile` trocam por 0 (contados em `LastSampleNonFiniteCount` /
+  `WavData.NonFiniteSamples` e avisados na nota de conversão); o detector ignora NaN na entrada; no app, o
+  conversor para o formato nativo transforma NaN em 0 e ±infinito em fundo de escala.
 - `TryDequeueEvent`: um único consumidor (UI/log); fila SPSC sem lock de 1024 eventos; se encher, eventos
   são descartados e contados em `DroppedEvents` (o áudio nunca espera). `TriggerEvent.SampleIndex` é o
   onset (cruzamento) em índice absoluto; `PlaybackSampleIndex` é onde o sample começou; `IsRetrigger`

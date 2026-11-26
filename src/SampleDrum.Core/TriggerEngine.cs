@@ -145,7 +145,29 @@ public sealed class TriggerEngine : IBlockProcessor
     public void SetSample(float[] monoSamplesAtEngineRate)
     {
         ArgumentNullException.ThrowIfNull(monoSamplesAtEngineRate);
+        // NaN/Inf would propagate to the driver output (Float32LSB passes them through): replace with silence.
+        LastSampleNonFiniteCount = SampleSanitizer.ReplaceNonFinite(monoSamplesAtEngineRate);
         _sample = monoSamplesAtEngineRate.Length == 0 ? null : monoSamplesAtEngineRate;
+    }
+
+    /// <summary>Number of NaN/Inf values replaced by 0 in the last <see cref="SetSample"/> call.</summary>
+    public int LastSampleNonFiniteCount { get; private set; }
+
+    /// <summary>
+    /// Clears the runtime state: voices, detector (envelope, filters, state machine, lockout), pending manual test,
+    /// unapplied settings are applied now, peak meter. Keeps the sample, settings, <see cref="Enabled"/> and the
+    /// absolute sample counter. NOT thread-safe with <see cref="Process"/>: call it only while no audio thread
+    /// is running (e.g. before starting the audio host), so a voice cut by a previous stop never resumes.
+    /// </summary>
+    public void Reset()
+    {
+        var pending = Interlocked.Exchange(ref _pendingParams, null);
+        if (pending != null) { _params = pending; _detector.SetParams(pending); }
+        _detector.Reset();
+        _voices.Clear();
+        Volatile.Write(ref _testRequested, 0);
+        Interlocked.Exchange(ref _inputPeakBits, 0);
+        _wasEnabled = _enabled;
     }
 
     /// <summary>Off the audio thread; coefficients are computed here and swapped in at the next block start.</summary>

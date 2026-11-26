@@ -34,6 +34,18 @@ internal sealed class VoicePool
         }
     }
 
+    /// <summary>Diagnostics/tests: voices playing normally and voices fading out.</summary>
+    internal (int Playing, int Fading) Counts()
+    {
+        int p = 0, f = 0;
+        foreach (ref readonly var v in _voices.AsSpan())
+        {
+            if (v.Data == null) continue;
+            if (v.Fading) f++; else p++;
+        }
+        return (p, f);
+    }
+
     public void Start(float[] data, float gain, bool isTest, int maxVoices, int fadeSamples)
     {
         if (data.Length == 0) return;
@@ -59,9 +71,18 @@ internal sealed class VoicePool
         for (int i = 0; i < _voices.Length; i++) if (_voices[i].Data == null) { slot = i; break; }
         if (slot < 0)
         {
-            // Every slot is busy fading: hard-cut the one closest to the end of its fade.
+            // No free slot (only possible when many voices are still fading): hard-cut the fading voice closest
+            // to the end of its fade; if, defensively, none is fading, take the oldest voice.
             for (int i = 0; i < _voices.Length; i++)
-                if (slot < 0 || _voices[i].FadeRemaining < _voices[slot].FadeRemaining) slot = i;
+            {
+                ref var v = ref _voices[i];
+                if (v.Fading && (slot < 0 || v.FadeRemaining < _voices[slot].FadeRemaining)) slot = i;
+            }
+            if (slot < 0)
+            {
+                for (int i = 0; i < _voices.Length; i++)
+                    if (slot < 0 || _voices[i].Order < _voices[slot].Order) slot = i;
+            }
         }
 
         _voices[slot] = new Voice { Data = data, Pos = 0, Gain = gain, Order = ++_order, IsTest = isTest };

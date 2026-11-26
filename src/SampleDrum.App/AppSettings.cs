@@ -31,6 +31,7 @@ public sealed class AppSettings
     // Advanced (calibration at the rehearsal).
     public float? HighPassHz { get; set; }
     public float? DetectTimeMs { get; set; }
+    public float? ScanMs { get; set; }
     public float? RearmTimeMs { get; set; }
     public float? RetriggerRiseDb { get; set; }
     public float? VelocityRangeDb { get; set; }
@@ -57,6 +58,7 @@ public sealed class AppSettings
             MinIntervalMs = MinIntervalMs ?? d.MinIntervalMs,
             HighPassHz = HighPassHz ?? d.HighPassHz,
             DetectTimeMs = DetectTimeMs ?? d.DetectTimeMs,
+            ScanMs = ScanMs ?? d.ScanMs,
             RearmTimeMs = RearmTimeMs ?? d.RearmTimeMs,
             RetriggerRiseDb = RetriggerRiseDb ?? d.RetriggerRiseDb,
             VelocityRangeDb = VelocityRangeDb ?? d.VelocityRangeDb,
@@ -78,6 +80,7 @@ public sealed class AppSettings
         MinIntervalMs = Opt(s.MinIntervalMs, d.MinIntervalMs);
         HighPassHz = Opt(s.HighPassHz, d.HighPassHz);
         DetectTimeMs = Opt(s.DetectTimeMs, d.DetectTimeMs);
+        ScanMs = Opt(s.ScanMs, d.ScanMs);
         RearmTimeMs = Opt(s.RearmTimeMs, d.RearmTimeMs);
         RetriggerRiseDb = Opt(s.RetriggerRiseDb, d.RetriggerRiseDb);
         VelocityRangeDb = Opt(s.VelocityRangeDb, d.VelocityRangeDb);

@@ -35,8 +35,11 @@ public static class NativeSampleConverter
                 break;
             }
             case AsioSampleType.Float32LSB:
-                MemoryMarshal.Cast<byte, float>(src).Slice(0, n).CopyTo(dest);
+            {
+                var s = MemoryMarshal.Cast<byte, float>(src);
+                for (int i = 0; i < n; i++) { float v = s[i]; dest[i] = float.IsFinite(v) ? v : 0f; }
                 break;
+            }
             case AsioSampleType.Int16LSB:
             {
                 var s = MemoryMarshal.Cast<byte, short>(src);
@@ -61,7 +64,11 @@ public static class NativeSampleConverter
         }
     }
 
-    /// <summary>Float -> native bytes, clamping to full scale. <paramref name="src"/>.Length frames are written.</summary>
+    /// <summary>
+    /// Float -> native bytes, clamping to full scale. NaN becomes 0 and ±Inf full scale in every format, so a bad
+    /// value can never reach the driver as NaN (Float32LSB) or as an undefined integer conversion.
+    /// <paramref name="src"/>.Length frames are written.
+    /// </summary>
     public static void FromFloat(ReadOnlySpan<float> src, AsioSampleType type, Span<byte> dest)
     {
         int n = src.Length;
@@ -72,7 +79,8 @@ public static class NativeSampleConverter
                 var d = MemoryMarshal.Cast<byte, int>(dest);
                 for (int i = 0; i < n; i++)
                 {
-                    double v = src[i] * 2147483648.0;
+                    float f = src[i];
+                    double v = float.IsNaN(f) ? 0.0 : f * 2147483648.0;
                     d[i] = v >= 2147483647.0 ? int.MaxValue : v <= -2147483648.0 ? int.MinValue : (int)v;
                 }
                 break;
@@ -83,7 +91,7 @@ public static class NativeSampleConverter
                 for (int i = 0; i < n; i++)
                 {
                     float v = src[i];
-                    d[i] = v > 1f ? 1f : v < -1f ? -1f : v;
+                    d[i] = float.IsNaN(v) ? 0f : v > 1f ? 1f : v < -1f ? -1f : v;
                 }
                 break;
             }
@@ -92,7 +100,7 @@ public static class NativeSampleConverter
                 var d = MemoryMarshal.Cast<byte, short>(dest);
                 for (int i = 0; i < n; i++)
                 {
-                    float v = src[i] * 32768f;
+                    float v = float.IsNaN(src[i]) ? 0f : src[i] * 32768f;
                     d[i] = v >= 32767f ? short.MaxValue : v <= -32768f ? short.MinValue : (short)v;
                 }
                 break;
@@ -101,7 +109,7 @@ public static class NativeSampleConverter
             {
                 for (int i = 0, b = 0; i < n; i++, b += 3)
                 {
-                    float f = src[i] * 8388608f;
+                    float f = float.IsNaN(src[i]) ? 0f : src[i] * 8388608f;
                     int v = f >= 8388607f ? 8388607 : f <= -8388608f ? -8388608 : (int)f;
                     dest[b] = (byte)v;
                     dest[b + 1] = (byte)(v >> 8);

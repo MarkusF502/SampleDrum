@@ -103,6 +103,15 @@ internal static class SelfTest
                 if (MathF.Abs(back[i] - expected) > tol) pass = false;
             }
             ok &= Check(pass, $"conversão float <-> {type} (com saturação)");
+
+            // NaN must become silence and ±Inf full scale, never NaN/garbage on the driver output.
+            float[] bad = [float.NaN, float.PositiveInfinity, float.NegativeInfinity];
+            var badBytes = new byte[bad.Length * NativeSampleConverter.BytesPerSample(type)];
+            var badBack = new float[bad.Length];
+            NativeSampleConverter.FromFloat(bad, type, badBytes);
+            NativeSampleConverter.ToFloat(badBytes, type, badBack);
+            bool nanOk = badBack[0] == 0f && badBack[1] > 0.99f && badBack[2] < -0.99f;
+            ok &= Check(nanOk, $"NaN/infinito -> {type} seguro (NaN = 0, ±inf = fundo de escala)");
         }
         return ok;
     }

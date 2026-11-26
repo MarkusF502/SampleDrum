@@ -41,11 +41,12 @@ public sealed record TriggerSettings
     public float RetriggerRiseDb { get; init; } = 9f;
 
     /// <summary>
-    /// Extra velocity scan window (ms) after the crossing. The peak is measured over
-    /// max(DetectTimeMs, ScanMs) samples and the trigger fires at the end of that window.
-    /// 0 (default) = measure inside the debounce window only (lowest latency).
+    /// Velocity scan window (ms) after the crossing. The peak of the raw (unfiltered) input is measured over
+    /// max(DetectTimeMs, ScanMs) samples and the trigger fires at the end of that window, so this is latency.
+    /// Default 2 ms: measured velocity error &lt;= 0.1 dB for kicks with a beater click or pitch sweep and
+    /// ~3 dB for a click-less 55 Hz sine (use 3 ms for very soft attacks). 0 = only the debounce window.
     /// </summary>
-    public float ScanMs { get; init; } = 0f;
+    public float ScanMs { get; init; } = 2f;
 
     /// <summary>Envelope (peak-hold follower) release time constant (ms). Attack is instantaneous.
     /// Must exceed half a period of the kick fundamental so zero crossings do not look like releases.</summary>
@@ -101,7 +102,7 @@ public sealed record TriggerSettings
             RearmTimeMs = Clamp(Finite(RearmTimeMs, 15f), 0f, 1000f),
             MinIntervalMs = Clamp(Finite(MinIntervalMs, 35f), 0f, 5000f),
             RetriggerRiseDb = Clamp(Finite(RetriggerRiseDb, 9f), 0f, 48f),
-            ScanMs = Clamp(Finite(ScanMs, 0f), 0f, 50f),
+            ScanMs = Clamp(Finite(ScanMs, 2f), 0f, 50f),
             EnvelopeReleaseMs = Clamp(Finite(EnvelopeReleaseMs, 20f), 0.1f, 2000f),
             HighPassHz = Clamp(Finite(HighPassHz, 40f), 0f, 2000f),
             LowPassHz = Clamp(Finite(LowPassHz, 0f), 0f, 20000f),

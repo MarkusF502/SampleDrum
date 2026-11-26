@@ -13,7 +13,7 @@ public readonly record struct TriggerEvent(long SampleIndex, float Peak, float V
 {
     /// <summary>
     /// Absolute sample index where the sample voice actually started playing
-    /// (= onset when ScanMs is 0, otherwise onset + scan window).
+    /// = onset + max(DetectTimeMs, ScanMs) in samples (= onset when both are 0). Manual test: block start.
     /// </summary>
     public long PlaybackSampleIndex { get; init; }
 

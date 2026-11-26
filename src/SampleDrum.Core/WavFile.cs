@@ -12,7 +12,11 @@ public enum WavSampleFormat { Pcm16, Pcm24, Float32 }
 /// <param name="Channels">Channel count in the file (before downmix).</param>
 /// <param name="BitsPerSample">Bits per sample in the file.</param>
 /// <param name="IsFloat">True for IEEE float files.</param>
-public sealed record WavData(float[] Mono, int SampleRate, int Channels, int BitsPerSample, bool IsFloat);
+public sealed record WavData(float[] Mono, int SampleRate, int Channels, int BitsPerSample, bool IsFloat)
+{
+    /// <summary>NaN/Inf samples found in the file (float formats) and replaced by 0.</summary>
+    public int NonFiniteSamples { get; init; }
+}
 
 /// <summary>
 /// Dependency-free RIFF/WAVE reader/writer. Reads PCM 8/16/24/32-bit, IEEE float 32/64-bit and
@@ -56,6 +60,7 @@ public static class WavFile
             long next = stream.Position + size + (size & 1);
             if (id == "fmt ")
             {
+                if (size < 16) throw new InvalidDataException($"Chunk 'fmt ' curto demais ({size} bytes; mínimo 16).");
                 format = br.ReadUInt16();
                 channels = br.ReadUInt16();
                 rate = br.ReadInt32();
@@ -112,7 +117,8 @@ public static class WavFile
                 sum += Decode(span.Slice(off, bytesPerSample), bits, isFloat);
             mono[f] = sum * inv;
         }
-        return new WavData(mono, rate, channels, bits, isFloat);
+        int nonFinite = SampleSanitizer.ReplaceNonFinite(mono);
+        return new WavData(mono, rate, channels, bits, isFloat) { NonFiniteSamples = nonFinite };
     }
 
     private static float Decode(ReadOnlySpan<byte> b, int bits, bool isFloat)
@@ -143,6 +149,7 @@ public static class WavFile
     {
         var wav = Read(path, channel);
         var notes = new List<string>();
+        if (wav.NonFiniteSamples > 0) notes.Add($"{wav.NonFiniteSamples} amostra(s) inválida(s) (NaN/infinito) trocadas por silêncio");
         if (channel >= 0 && wav.Channels != 1) notes.Add($"usando só o canal {channel + 1} de {wav.Channels}");
         else if (wav.Channels != 1) notes.Add($"{wav.Channels} canais convertidos para mono (média)");
         float[] result = wav.Mono;

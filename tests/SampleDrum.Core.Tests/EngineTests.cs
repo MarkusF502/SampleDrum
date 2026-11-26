@@ -146,7 +146,7 @@ public class EngineTests
         Assert.Equal(-20f, s.RearmDb);
         Assert.Equal(16, s.MaxVoices);
         Assert.Equal(0f, s.MinGainDb);
-        Assert.Equal(0f, s.ScanMs);
+        Assert.Equal(2f, s.ScanMs);   // NaN falls back to the default
         Assert.Equal(0f, s.DetectTimeMs);
     }
 
@@ -228,8 +228,8 @@ public class EngineTests
             }
         }
 
-        var warm = new TriggerEngine(Fs, s);          // JIT warm-up on a separate engine
-        warm.SetSample(DcSample(16));
+        var warm = new TriggerEngine(Fs, s);          // JIT warm-up on a separate engine, same code paths
+        warm.SetSample(DcSample(Fs * 2));             // (long sample => voice steals/fades are exercised too)
         for (int start = 0; start + 128 <= mic.Length; start += 128) warm.Process(mic.AsSpan(start, 128), new float[128]);
 
         long before = GC.GetAllocatedBytesForCurrentThread();

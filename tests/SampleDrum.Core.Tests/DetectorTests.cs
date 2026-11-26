@@ -363,16 +363,17 @@ public class DetectorTests
     [InlineData(32)]
     [InlineData(128)]
     [InlineData(61)]
-    public void Latency_SampleStartsWithinDetectTimePlusOneSample(int block)
+    public void Latency_SampleStartsWithinTriggerWindowPlusOneSample(int block)
     {
         var mic = new float[Fs];
         long onset = 4000 + block / 3;
         AddCosBurst(mic, onset, -6f, 100, 30);
         var r = Run(mic, Defaults, block, DcSample(1000));
         var e = Assert.Single(r.Events);
-        long detect = Ms(Defaults.DetectTimeMs);
+        // Bound = the configured trigger window, max(DetectTimeMs, ScanMs) (2 ms by default), + 1 sample.
+        long window = Math.Max(Ms(Defaults.DetectTimeMs), Ms(Defaults.ScanMs));
         Assert.Equal(onset, e.SampleIndex);
-        Assert.InRange(e.PlaybackSampleIndex - onset, 0, detect + 1);
+        Assert.InRange(e.PlaybackSampleIndex - onset, 0, window + 1);
         Assert.Equal((int)e.PlaybackSampleIndex, FirstNonZero(r.Output));
     }
 

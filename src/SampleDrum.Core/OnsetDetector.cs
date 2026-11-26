@@ -3,7 +3,8 @@ namespace SampleDrum.Core;
 /// <summary>Result of one detected onset.</summary>
 /// <param name="OnsetIndex">Absolute sample index of the threshold crossing.</param>
 /// <param name="FireIndex">Absolute sample index where the trigger fires (= onset + max(detect, scan) window).</param>
-/// <param name="Peak">Linear peak of |detector signal| over the window.</param>
+/// <param name="Peak">Linear peak of the raw (unfiltered) |input| over the window. The filters only drive detection:
+/// a 40 Hz high-pass shrinks the first half-cycle of a low kick by several dB, which would understate velocity.</param>
 /// <param name="Velocity">0..1, see <see cref="TriggerSettings.VelocityRangeDb"/>.</param>
 /// <param name="IsRetrigger">True when the onset was accepted during the previous hit's sustain (rise re-trigger).</param>
 public readonly record struct DetectedOnset(long OnsetIndex, long FireIndex, float Peak, float Velocity, bool IsRetrigger);
@@ -42,7 +43,7 @@ public enum DetectorState
 /// so that hit's sustain cannot fire later.</item>
 /// <item>DETECT: collects max(DetectTime, Scan) samples starting at the crossing. After DetectTime samples the
 /// mean square of |y| must reach the threshold (debounce); otherwise it was an isolated spike → back to OFF
-/// (or ON if it started on a sustain). At the end of the window the trigger fires with the window's peak
+/// (or ON if it started on a sustain). At the end of the window the trigger fires with the peak of the raw input
 /// → ON.</item>
 /// <item>ON → RELEASE when the envelope falls to the release level; RELEASE → ON if it rises again;
 /// RELEASE → OFF (re-armed) after ReleaseTime below it.</item>
@@ -65,11 +66,18 @@ public sealed class OnsetDetector
     private int _windowCount;
     private double _sumSq;
     private float _peak;
+    private float _rawAbs;   // |x| of the current sample before the detector filters (velocity source)
     private bool _debounced;
     private bool _fromSustain;
     private int _releaseCount;
     private float _envMin;
     private long _lastOnset = long.MinValue / 4;
+    // Window lengths frozen at the crossing, so a settings change in the middle of DETECT
+    // can neither skip the debounce nor cut the window short.
+    private int _winDetect, _winTotal;
+
+    /// <summary>Filter states below this magnitude are flushed to exactly 0 (avoids subnormal slowdowns in silence).</summary>
+    private const double DenormalFlush = 1e-25;
 
     public OnsetDetector(int sampleRate, TriggerSettings settings)
         : this(new EngineParams(sampleRate, settings)) { }
@@ -81,6 +89,9 @@ public sealed class OnsetDetector
 
     /// <summary>Current state.</summary>
     public DetectorState State => _state;
+
+    /// <summary>True when all filter states are exactly zero (diagnostics/tests).</summary>
+    internal bool FilterStateIsZero => _hpZ1 == 0 && _hpZ2 == 0 && _lpZ1 == 0 && _lpZ2 == 0;
 
     /// <summary>True when the detector is OFF, i.e. armed for a normal crossing.</summary>
     public bool IsArmed => _state == DetectorState.Off;
@@ -102,7 +113,8 @@ public sealed class OnsetDetector
         _hpZ1 = _hpZ2 = _lpZ1 = _lpZ2 = 0;
         _env = 0f;
         _state = DetectorState.Off;
-        _windowCount = 0; _sumSq = 0; _peak = 0f; _debounced = false; _fromSustain = false;
+        _windowCount = 0; _sumSq = 0; _peak = 0f; _rawAbs = 0f; _debounced = false; _fromSustain = false;
+        _winDetect = _winTotal = 0;
         _releaseCount = 0; _envMin = 0f;
         _lastOnset = long.MinValue / 4;
     }
@@ -116,6 +128,8 @@ public sealed class OnsetDetector
         var p = _p;
         onset = default;
 
+        _rawAbs = Math.Abs(x);
+        if (!float.IsFinite(_rawAbs)) _rawAbs = 0f;
         double y = x;
         if (p.HighPass.Enabled)
         {
@@ -123,6 +137,8 @@ public sealed class OnsetDetector
             double o = c.B0 * y + _hpZ1;
             _hpZ1 = c.B1 * y - c.A1 * o + _hpZ2;
             _hpZ2 = c.B2 * y - c.A2 * o;
+            if (Math.Abs(_hpZ1) < DenormalFlush) _hpZ1 = 0;
+            if (Math.Abs(_hpZ2) < DenormalFlush) _hpZ2 = 0;
             y = o;
         }
         if (p.LowPass.Enabled)
@@ -131,6 +147,8 @@ public sealed class OnsetDetector
             double o = c.B0 * y + _lpZ1;
             _lpZ1 = c.B1 * y - c.A1 * o + _lpZ2;
             _lpZ2 = c.B2 * y - c.A2 * o;
+            if (Math.Abs(_lpZ1) < DenormalFlush) _lpZ1 = 0;
+            if (Math.Abs(_lpZ2) < DenormalFlush) _lpZ2 = 0;
             y = o;
         }
 
@@ -189,11 +207,13 @@ public sealed class OnsetDetector
 
         _onset = index;
         _fromSustain = fromSustain;
-        _peak = a;
+        _peak = _rawAbs;
         _windowCount = 1;
         _sumSq = (double)a * a;
-        _debounced = p.DetectSamples <= 0;
-        if (p.WindowSamples <= 0)
+        _winDetect = p.DetectSamples;
+        _winTotal = p.WindowSamples;
+        _debounced = _winDetect <= 0;
+        if (_winTotal <= 0)
         {
             Fire(index, out onset);
             return true;
@@ -208,9 +228,9 @@ public sealed class OnsetDetector
         onset = default;
 
         // _windowCount samples [onset, index) are already in the window.
-        if (!_debounced && _windowCount >= p.DetectSamples)
+        if (!_debounced && _windowCount >= _winDetect)
         {
-            if (_sumSq / p.DetectSamples < p.ThresholdSq)
+            if (_sumSq / _winDetect < p.ThresholdSq)
             {
                 // Isolated spike: abort without touching the lockout.
                 if (_fromSustain) { EnterOn(); return false; }
@@ -220,14 +240,14 @@ public sealed class OnsetDetector
             _debounced = true;
         }
 
-        if (_windowCount >= p.WindowSamples)
+        if (_windowCount >= _winTotal)
         {
             Fire(index, out onset);
             return true;
         }
 
-        if (_windowCount < p.DetectSamples) _sumSq += (double)a * a;
-        if (a > _peak) _peak = a;
+        if (_windowCount < _winDetect) _sumSq += (double)a * a;
+        if (_rawAbs > _peak) _peak = _rawAbs;
         _windowCount++;
         return false;
     }

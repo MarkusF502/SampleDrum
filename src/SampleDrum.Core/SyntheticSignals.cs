@@ -44,6 +44,13 @@ public static class SyntheticSignals
         return h;
     }
 
+    /// <summary>
+    /// Click-less kick: no beater noise, sine body starting at phase 0 (the slowest possible attack).
+    /// <paramref name="startHz"/> = <paramref name="endHz"/> gives a pure tone (e.g. 55 Hz, peak ~4.5 ms after onset).
+    /// </summary>
+    public static float[] CleanKick(int sampleRate, float peakLin, float sustainMs, float startHz = 55f, float endHz = 55f)
+        => Kick(sampleRate, peakLin, sustainMs, seed: 0, startHz, endHz, clickLevel: 0f);
+
     /// <summary>Adds <paramref name="hit"/> into <paramref name="buffer"/> starting at <paramref name="start"/>.</summary>
     public static void Add(float[] buffer, float[] hit, long start)
     {

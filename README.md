@@ -145,7 +145,8 @@ Ainda não confirmado (sem hardware até agora):
   `Float32LSB`, `Int16LSB` e `Int24LSB`).
 - Tipo de fonte de áudio usada no OBS (ASIO, WASAPI/WDM) e se o driver X-USB aceita o app e o OBS ao mesmo
   tempo (driver compartilhado).
-- Latência real ida e volta (buffer configurado no painel do driver + conversões + `DetectTimeMs`).
+- Latência real ida e volta (buffer configurado no painel do driver + conversões + janela de disparo
+  `max(DetectTimeMs, ScanMs)`, 2 ms por padrão; ajustável em **Avançado → Janela de velocidade**).
 - Níveis reais do bumbo e do vazamento, e portanto os padrões finais de limiar, velocity, intervalo mínimo e
   redisparo.
 
