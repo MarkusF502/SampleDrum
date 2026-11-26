@@ -1,3 +1,5 @@
+using SampleDrum.Core.Kit;
+
 namespace SampleDrum.Core.Simulation;
 
 /// <summary>What an expectation is testing.</summary>
@@ -60,9 +62,11 @@ public sealed class KitScenario
     public IReadOnlyList<BleedPath> Bleed { get; }
 
     /// <summary>
-    /// Per-piece detection thresholds used by the harness (dBFS). The toms are higher than the -24 dBFS default
-    /// because their mics carry bleed: worst-case bleed (hard kick -3 dBFS - 18 dB = -21; hard snare -3 - 15 = -18)
-    /// stays 4-5 dB below them, while the toms' own soft hits stay ~9-10 dB above. Calibrate on the real kit.
+    /// Per-piece detection thresholds used by the harness (dBFS): the Core per-piece defaults
+    /// (<see cref="KitDefaults"/>: Bumbo -24, Caixa -20, Tom -20) except the Surdo, raised from -22 to -16 dBFS:
+    /// a hard kick (-3 dBFS) leaking at -18 dB reaches about -21 dBFS in the floor-tom mic, above the -22 default, and
+    /// would trigger it. With -16 the worst bleed stays 5 dB below while the floor tom's soft hits (-6) stay 10 dB above.
+    /// This is a calibration note for the rehearsal, not a rule. User mics (<see cref="FromMics"/>) use the plain defaults.
     /// </summary>
     public IReadOnlyList<float> ThresholdDb { get; }
 
@@ -76,10 +80,16 @@ public sealed class KitScenario
         Bleed = bleed; ThresholdDb = thresholds;
     }
 
-    /// <summary>Detection settings for <paramref name="piece"/>: Core defaults with this scenario's threshold
-    /// (re-arm moves with it, keeping the default hysteresis).</summary>
+    /// <summary>Detection settings for <paramref name="piece"/>: the Core per-piece defaults
+    /// (<see cref="KitDefaults.TriggerFor"/>) with this scenario's threshold (re-arm moves with it, keeping the hysteresis).</summary>
     public TriggerSettings RecommendedSettings(int piece)
-        => TriggerSettings.Default.WithThreshold(ThresholdDb[piece]).Normalized();
+        => KitDefaults.TriggerFor((DrumPiece)piece).WithThreshold(ThresholdDb[piece]).Normalized();
+
+    /// <summary>Surdo threshold used with the synthetic scenario (see <see cref="ThresholdDb"/>).</summary>
+    public const float SyntheticFloorTomThresholdDb = -16f;
+
+    private static float[] DefaultThresholds() =>
+        DrumPieces.All.Select(p => KitDefaults.TriggerFor(p).ThresholdDb).ToArray();
 
     /// <summary>Synthetic samples only (e.g. to load into the engine when the mics come from user WAVs).</summary>
     public static float[][] SyntheticSamples(int sampleRate = DefaultSampleRate)
@@ -174,7 +184,14 @@ public sealed class KitScenario
         }
 
         expected.Sort((a, b) => a.SampleIndex != b.SampleIndex ? a.SampleIndex.CompareTo(b.SampleIndex) : a.Piece.CompareTo(b.Piece));
-        return new KitScenario(fs, seed, mics, SyntheticSamples(fs), hits, expected, bleed, [-24f, -24f, -14f, -16f]);
+        return new KitScenario(fs, seed, mics, SyntheticSamples(fs), hits, expected, bleed, SyntheticThresholds());
+    }
+
+    private static float[] SyntheticThresholds()
+    {
+        var t = DefaultThresholds();
+        t[(int)DrumPiece.FloorTom] = SyntheticFloorTomThresholdDb;
+        return t;
     }
 
     /// <summary>Wraps user-provided mic tracks (no expectations; the report then only lists detections).</summary>
@@ -183,6 +200,6 @@ public sealed class KitScenario
         if (mics.Length != SyntheticKit.PieceCount) throw new ArgumentException("São necessários 4 microfones.", nameof(mics));
         int len = mics.Max(m => m.Length);
         var padded = mics.Select(m => m.Length == len ? m : m.Concat(new float[len - m.Length]).ToArray()).ToArray();
-        return new KitScenario(sampleRate, 0, padded, SyntheticSamples(sampleRate), [], [], [], [-24f, -24f, -24f, -24f]);
+        return new KitScenario(sampleRate, 0, padded, SyntheticSamples(sampleRate), [], [], [], DefaultThresholds());
     }
 }
