@@ -247,7 +247,7 @@ do vazamento; passa-altas abaixo da fundamental da peça). Todos precisam de cal
 | Bumbo | −24 / −30 dBFS | 40 Hz | 20 ms / 15 ms | 35 ms | — | padrões da v1 |
 | Caixa | −20 / −26 dBFS | 100 Hz | 10 ms / 10 ms | 25 ms | faixa de velocidade 30 dB | fundamental 180-250 Hz (período 4-5,5 ms); muito vazamento de bumbo e chimbal; rulos e flams rápidos; ghost notes |
 | Tom | −20 / −26 dBFS | 60 Hz | 15 ms / 15 ms | 30 ms | — | fundamental 100-150 Hz (7-10 ms); microfone ouve o kit inteiro e o tom toca pouco |
-| Surdo | −22 / −28 dBFS | 50 Hz | 20 ms / 15 ms | 30 ms | — | fundamental 70-100 Hz (10-14 ms), perto do bumbo; vazamento forte entre os dois |
+| Surdo | −16 / −22 dBFS | 50 Hz | 20 ms / 15 ms | 30 ms | — | fundamental 70-100 Hz (10-14 ms), perto do bumbo; o bumbo vaza forte no microfone do surdo: no cenário do harness um bumbo de −3 dBFS vazando a −18 dB (≈ −21 dBFS) disparava −22; −16 deixa 5 dB de folga sobre o vazamento e 10 dB sob os golpes suaves (−6 dBFS). O cenário usa estes padrões sem exceção. |
 
 ## Contrato com o app (thread de áudio)
 

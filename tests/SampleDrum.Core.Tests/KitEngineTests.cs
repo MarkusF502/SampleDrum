@@ -199,6 +199,35 @@ public class KitEngineTests
     }
 
     [Fact]
+    public void SyntheticScenario_UsesExactlyTheKitDefaults()
+    {
+        var sc = SampleDrum.Core.Simulation.KitScenario.Generate(1, Fs);
+        foreach (var p in DrumPieces.All)
+            Assert.Equal(KitDefaults.TriggerFor(p).ThresholdDb, sc.ThresholdDb[(int)p]);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    [InlineData(7)]
+    public void DefaultKit_PassesSyntheticScenario_KickBleedDoesNotFireFloorTom(int seed)
+    {
+        // Guards the floor-tom default (-16 dBFS): the scenario's hard kick leaks into the floor-tom mic at about
+        // -21 dBFS, which fired the previous -22 dBFS default. Tolerance 2 ms (soft hits cross a little late).
+        var sc = SampleDrum.Core.Simulation.KitScenario.Generate(seed, Fs);
+        var (_, events) = Run(Engine(KitSettings.Default), sc.Mics, 256);
+        long tol = 2 * ToleranceSamples;
+        foreach (var x in sc.Expected)
+        {
+            var near = events.Where(e => (int)e.Piece == x.Piece && Math.Abs(e.Event.SampleIndex - x.SampleIndex) <= tol).ToList();
+            if (x.ExpectTrigger) Assert.True(near.Count == 1, $"{(DrumPiece)x.Piece} {x.Label} @ {x.SampleIndex}: {near.Count} eventos");
+            else Assert.True(near.Count == 0, $"{(DrumPiece)x.Piece} {x.Label} @ {x.SampleIndex}: disparou");
+        }
+        Assert.Equal(sc.Expected.Count(x => x.ExpectTrigger), events.Count);
+    }
+
+    [Fact]
     public void ApplyKit_OldVoicesFinishWithOldSample_NewHitsUseNewKit()
     {
         var settings = AllPieces(Impulsive);

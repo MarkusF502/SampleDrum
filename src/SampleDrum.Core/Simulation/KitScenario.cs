@@ -62,11 +62,10 @@ public sealed class KitScenario
     public IReadOnlyList<BleedPath> Bleed { get; }
 
     /// <summary>
-    /// Per-piece detection thresholds used by the harness (dBFS): the Core per-piece defaults
-    /// (<see cref="KitDefaults"/>: Bumbo -24, Caixa -20, Tom -20) except the Surdo, raised from -22 to -16 dBFS:
-    /// a hard kick (-3 dBFS) leaking at -18 dB reaches about -21 dBFS in the floor-tom mic, above the -22 default, and
-    /// would trigger it. With -16 the worst bleed stays 5 dB below while the floor tom's soft hits (-6) stay 10 dB above.
-    /// This is a calibration note for the rehearsal, not a rule. User mics (<see cref="FromMics"/>) use the plain defaults.
+    /// Per-piece detection thresholds used by the harness (dBFS): exactly the Core per-piece defaults
+    /// (<see cref="KitDefaults"/>: Bumbo -24, Caixa -20, Tom -20, Surdo -16), so the scenario and the defaults cannot
+    /// diverge silently. The Surdo default was raised from -22 to -16 because this scenario's kick bleed (-3 dBFS hit
+    /// at -18 dB, about -21 dBFS in the floor-tom mic) fired -22. Real values come from church recordings.
     /// </summary>
     public IReadOnlyList<float> ThresholdDb { get; }
 
@@ -84,9 +83,6 @@ public sealed class KitScenario
     /// (<see cref="KitDefaults.TriggerFor"/>) with this scenario's threshold (re-arm moves with it, keeping the hysteresis).</summary>
     public TriggerSettings RecommendedSettings(int piece)
         => KitDefaults.TriggerFor((DrumPiece)piece).WithThreshold(ThresholdDb[piece]).Normalized();
-
-    /// <summary>Surdo threshold used with the synthetic scenario (see <see cref="ThresholdDb"/>).</summary>
-    public const float SyntheticFloorTomThresholdDb = -16f;
 
     private static float[] DefaultThresholds() =>
         DrumPieces.All.Select(p => KitDefaults.TriggerFor(p).ThresholdDb).ToArray();
@@ -184,15 +180,9 @@ public sealed class KitScenario
         }
 
         expected.Sort((a, b) => a.SampleIndex != b.SampleIndex ? a.SampleIndex.CompareTo(b.SampleIndex) : a.Piece.CompareTo(b.Piece));
-        return new KitScenario(fs, seed, mics, SyntheticSamples(fs), hits, expected, bleed, SyntheticThresholds());
+        return new KitScenario(fs, seed, mics, SyntheticSamples(fs), hits, expected, bleed, DefaultThresholds());
     }
 
-    private static float[] SyntheticThresholds()
-    {
-        var t = DefaultThresholds();
-        t[(int)DrumPiece.FloorTom] = SyntheticFloorTomThresholdDb;
-        return t;
-    }
 
     /// <summary>Wraps user-provided mic tracks (no expectations; the report then only lists detections).</summary>
     public static KitScenario FromMics(float[][] mics, int sampleRate = DefaultSampleRate)

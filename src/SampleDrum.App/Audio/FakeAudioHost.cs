@@ -52,17 +52,6 @@ public sealed class FakeAudioHost : IAudioHost
         _previewEnabled = _options.PreviewEnabled;
     }
 
-    /// <summary>
-    /// v1 compatibility (single kick channel, used by the v1 MainForm until it moves to <see cref="KitEngine"/>):
-    /// runs <paramref name="processor"/> as the Kick piece on the synthetic kit's kick mic, looping.
-    /// </summary>
-    public FakeAudioHost(IBlockProcessor processor, int sampleRate = EngineRate, int blockSize = 256)
-        : this(new SinglePieceAdapter(processor), new ResolvedRouting("v1", [0, null, null, null], [0, null, null, null]),
-            new FakeHostOptions { BlockSize = blockSize })
-    {
-        if (sampleRate != EngineRate) throw new ArgumentOutOfRangeException(nameof(sampleRate), "A simulação roda a 48 kHz.");
-    }
-
     public event Action<string>? Faulted;
 
     /// <summary>Raised (on the simulation thread) when a non-looping source reached its end and the host stopped.</summary>
@@ -362,13 +351,5 @@ public sealed class FakeAudioHost : IAudioHost
         int bits = BitConverter.SingleToInt32Bits(value), cur;
         while (value > BitConverter.Int32BitsToSingle(cur = Volatile.Read(ref bitsField)))
             if (Interlocked.CompareExchange(ref bitsField, bits, cur) == cur) break;
-    }
-
-    /// <summary>Runs a v1 <see cref="IBlockProcessor"/> as the Kick piece.</summary>
-    private sealed class SinglePieceAdapter(IBlockProcessor inner) : IMultiChannelProcessor
-    {
-        public int PieceCount => DrumPieces.Count;
-        public void Process(float[][] inputs, float[][] outputs, int frames)
-            => inner.Process(inputs[0].AsSpan(0, frames), outputs[0].AsSpan(0, frames));
     }
 }

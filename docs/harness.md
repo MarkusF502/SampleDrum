@@ -133,12 +133,15 @@ Quatro trilhas de microfone a 48 kHz, 14,5 s, determinísticas pela semente (ru�
 Cada peça tem um timbre de microfone e um sample sintético diferentes (bumbo com varredura 120→50 Hz, caixa com
 ruído + tom, tom ~190→140 Hz, surdo ~120→85 Hz), para os retornos serem fáceis de distinguir de ouvido.
 
-Detecção usada no cenário: os padrões por peça do Core (`KitDefaults`: Bumbo −24, Caixa −20, Tom −20 dBFS, com os
-filtros e tempos de cada peça), **exceto o Surdo, com limiar −16 dBFS em vez de −22**. Motivo, medido no harness:
-com −22 dBFS, uma batida forte de bumbo (−3 dBFS) vazando a −18 dB chega a ≈ −21 dBFS no microfone do surdo e o
-dispara (1 disparo extra). Isto é uma **nota de calibração para o ensaio**: o motor não tem "gate" entre canais na
-v2, então o limiar de cada tom precisa ficar acima do vazamento mais forte que o microfone dele recebe.
-Com `--mics` (seus WAVs) o harness usa os padrões do Core sem alteração.
+Detecção usada no cenário: **exatamente** os padrões por peça do Core (`KitDefaults`: Bumbo −24, Caixa −20,
+Tom −20, Surdo −16 dBFS, com os filtros e tempos de cada peça), sem exceções, para o cenário e os padrões nunca
+divergirem em silêncio. O padrão do Surdo era −22 dBFS e foi elevado para −16: com −22, uma batida forte de bumbo
+(−3 dBFS) vazando a −18 dB chega a ≈ −21 dBFS no microfone do surdo e o dispara (1 disparo extra por rodada,
+medido com as sementes 1, 2, 3 e 7). Com −16 esse vazamento fica 5 dB abaixo e os golpes suaves do surdo (−6 dBFS)
+10 dB acima. O vazamento caixa → tom (−15 dB) não dispara o Tom nem com −22, então Tom e Caixa ficaram como estavam.
+Isto é uma **nota de calibração para o ensaio**: o motor não tem "gate" entre canais na v2, então o limiar de cada
+tom precisa ficar acima do vazamento mais forte que o microfone dele recebe; os valores reais saem das gravações da
+igreja. Com `--mics` (seus WAVs) o harness também usa os padrões do Core.
 
 ## Simulação na janela (`--simulation`) e API para a interface
 
@@ -183,7 +186,7 @@ Pacote `NAudio.WinMM` **3.3.0** (MIT), conferido no XML do pacote e no código-f
 | `--harness ... --block abc` | mensagem de erro em português, código 2 |
 | `SampleDrum.Offline --kit <pasta> --block 480 --seed 7` | OK, código 0 |
 | `dotnet publish ... -r win-x64 --self-contained` + exe publicado: `--harness --realtime`, `--selftest`, `--list-drivers` | OK, OK, "nenhum driver ASIO instalado" |
-| exe publicado com `--simulation` | abre e fecha sem erro (a janela ainda não usa a opção, ver abaixo) |
+| exe publicado com `--simulation` | abre e fecha sem erro (nesta data a janela ainda não usava a opção; ligada depois pelo worker multicanal, ver abaixo) |
 
 Resumo por peça do cenário sintético (semente 1, bloco 256; igual no offline e no tempo real):
 
@@ -203,8 +206,8 @@ com o kit antigo, as novas usam o novo) offline e com o host em tempo real rodan
 nativos do ASIO.
 
 Para provar que o relatório reprova quando deve, durante o desenvolvimento foram feitas rodadas negativas (fora do
-repositório): limiar −24 em todas as peças e também os padrões do Core sem a exceção do surdo (o vazamento do bumbo
-vira **extra** no surdo), saídas 1 e 2 trocadas (**saída-errada** em bumbo e caixa) e surdo desligado (todas as
+repositório): limiar −24 em todas as peças e também o antigo padrão −22 dBFS do surdo (o vazamento do bumbo
+vira **extra** no surdo; por isso o padrão passou a −16), saídas 1 e 2 trocadas (**saída-errada** em bumbo e caixa) e surdo desligado (todas as
 batidas do surdo **faltando**). O teste automático `HarnessTests.EvaluatorFlagsMissingExtraAndWrongOutput` mantém
 essa garantia: remove as detecções da caixa, inventa um disparo do tom e manda o áudio do bumbo para a USB 2, e exige
 **faltando**, **extra** e **saída-errada**.
@@ -217,7 +220,7 @@ essa garantia: remove as detecções da caixa, inventa um disparo do tom e manda
   processados no tempo certo em média, mas em rajadas do tamanho da resolução do timer do Windows. Serve para ouvir e
   exercitar a interface; não é uma medida de latência.
 * O motor v2 não tem "gate" entre canais: vazamento acima do limiar de uma peça dispara essa peça (ver nota do surdo).
-* `--simulation` só liga a opção: a janela v2 de 4 peças ainda não lê `StartupOptions`, e a "Simulação (sem ASIO)"
-  da janela ainda usa o construtor de compatibilidade v1 do `FakeAudioHost` (só o bumbo é simulado). Falta trocar
-  para `new FakeAudioHost(kit, roteamento, opções)` na janela (arquivo do worker multicanal). O harness pela linha de
-  comando (`--harness`, `--selftest`) já usa as 4 peças.
+* (Resolvido pelo worker multicanal.) A janela v2 lê `StartupOptions` (`--simulation` abre no perfil Simulação com
+  o kit sintético) e a "Simulação (sem ASIO)" da janela usa `new FakeAudioHost(kit, roteamento, opções)` com as
+  quatro peças, fonte, bloco, repetição e prévia escolhidos no painel "Simulação (sem ASIO)". O construtor de
+  compatibilidade v1 do `FakeAudioHost` foi removido.

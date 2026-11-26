@@ -90,9 +90,12 @@ public static class KitDefaults
 
     /// <summary>
     /// Floor tom (surdo): fundamental ~70-100 Hz (period 10-14 ms), close to the kick: 50 Hz high-pass, 20 ms
-    /// envelope release (as the kick), threshold -22 dBFS (bleed between kick and floor tom is strong), 30 ms lockout.
+    /// envelope release (as the kick), 30 ms lockout. Threshold -16 dBFS because the kick bleeds strongly into the
+    /// floor-tom mic: a hard kick (-3 dBFS) leaking at -18 dB arrives at about -21 dBFS, which fired a -22 dBFS
+    /// threshold in the harness scenario; -16 keeps that bleed 5 dB below and soft floor-tom hits (-6 dBFS) 10 dB
+    /// above. The harness scenario uses these defaults unchanged; real values come from church recordings.
     /// </summary>
-    public static TriggerSettings FloorTom { get; } = TriggerSettings.Default.WithThreshold(-22f) with
+    public static TriggerSettings FloorTom { get; } = TriggerSettings.Default.WithThreshold(-16f) with
     {
         HighPassHz = 50f,
         EnvelopeReleaseMs = 20f,

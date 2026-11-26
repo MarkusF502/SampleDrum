@@ -24,9 +24,9 @@ samples com os microfones originais na mesa.
   trocado e o kit atual continua.
 - **Perfis de roteamento** (Igreja / Simulação) editáveis, com **validação visível** antes de iniciar.
 - Modo **Simulação (sem ASIO)**, `--selftest` sem hardware e **modo offline** que processa arquivos WAV com o
-  mesmo motor do modo ao vivo. Nesta versão a simulação da janela alimenta só o **bumbo** com um bumbo sintético
-  (as outras peças ficam sem entrada; o **Testar** delas funciona); a simulação das quatro peças com WAVs de
-  microfone e prévia nos alto-falantes do PC chega com o trabalho do harness.
+  mesmo motor do modo ao vivo. A simulação da janela alimenta as **quatro peças** (kit sintético, quatro WAVs de
+  microfone ou um WAV multicanal) e pode tocar uma **prévia** nos fones/alto-falantes do PC. Ver também
+  [docs/harness.md](docs/harness.md) (`--harness`, `--simulation`).
 - Guarda tudo em `%AppData%\SampleDrum\settings.json` (versão 2; canais na numeração da mesa).
 
 ## O que não faz
@@ -79,6 +79,12 @@ Detalhes do detector, dos padrões e dos testes: [docs/README-dev.md](docs/READM
 # rodar a interface
 dotnet run -c Release --project src/SampleDrum.App
 
+# interface já em simulação: perfil "Simulação", host sem ASIO e kit sintético carregado
+.\src\SampleDrum.App\bin\Release\net10.0-windows\SampleDrum.App.exe --simulation
+
+# cenário de teste completo sem a mesa (relatório e retornos gravados na pasta; código 0 = tudo certo)
+.\src\SampleDrum.App\bin\Release\net10.0-windows\SampleDrum.App.exe --harness C:\temp\sd-teste > harness.txt; Get-Content harness.txt
+
 # teste sem hardware; grava a saída num arquivo
 .\src\SampleDrum.App\bin\Release\net10.0-windows\SampleDrum.App.exe --selftest > selftest.txt; Get-Content selftest.txt
 
@@ -99,6 +105,11 @@ Detalhes do ASIO/NAudio: [docs/asio-naudio.md](docs/asio-naudio.md).
 
 - **Áudio**: driver (ou "Simulação (sem ASIO)"), **Perfil de rotas** (Igreja / Simulação) com **Editar
   rotas...**, a **lista de validação** do roteamento, Iniciar/Parar áudio e a linha de buffer/latência.
+- **Simulação (sem ASIO)** (só aparece com esse driver escolhido): fonte dos microfones (kit sintético com
+  semente, 4 WAVs de microfone ou WAV multicanal com o canal de cada peça), tamanho do bloco, repetir, **Carregar kit
+  sintético**, e a **prévia nos fones** (volume, quais peças entram, microfones por baixo). A fonte e o bloco valem
+  no próximo "Iniciar áudio"; a prévia muda na hora. Na simulação só as peças **roteadas no perfil** recebem sinal
+  (perfil Simulação = as quatro; perfil Igreja = só o bumbo enquanto os outros estão pendentes).
 - **Kit**: **Ativar kit / Desativar kit**; preset (**Aplicar preset**, **Abrir arquivo...**,
   **Salvar preset...**); pasta de samples.
 - Uma faixa por peça (**Bumbo, Caixa, Tom, Surdo**): **Ativa**, rota na numeração da mesa ("Entrada USB 3
@@ -118,7 +129,7 @@ ajustes de detecção que diferem do padrão da peça.
 | Bumbo | CH 21 / AES50 B21 | os da v1: limiar −24 dBFS, passa-altas 40 Hz, intervalo mínimo 35 ms |
 | Caixa | CH 19 / AES50 B19 | limiar −20 dBFS, passa-altas 100 Hz (tira o vazamento do bumbo), intervalo 25 ms (rulos/flams), faixa de velocidade 30 dB (ghost notes) |
 | Tom | CH 18 / AES50 B18 | limiar −20 dBFS (o microfone ouve o kit inteiro), passa-altas 60 Hz, intervalo 30 ms |
-| Surdo | CH 17 / AES50 B17 | limiar −22 dBFS, passa-altas 50 Hz, release do envelope 20 ms (fundamental grave, perto do bumbo) |
+| Surdo | CH 17 / AES50 B17 | limiar −16 dBFS (o bumbo vaza forte no microfone do surdo), passa-altas 50 Hz, release do envelope 20 ms (fundamental grave, perto do bumbo) |
 
 O porquê de cada valor está em [docs/README-dev.md](docs/README-dev.md).
 
