@@ -11,6 +11,9 @@ public enum ExpectationKind
     Bleed,
     /// <summary>Second stroke inside the minimum interval (lockout): must NOT trigger.</summary>
     DoubleInsideLockout,
+    /// <summary>Real hit below the piece's detection threshold: expected to be missed. Reported as a known
+    /// limitation (not a failure) so the trade-off of the threshold stays visible.</summary>
+    BelowThreshold,
 }
 
 /// <summary>A hit written into a mic track.</summary>
@@ -29,7 +32,12 @@ public sealed record ScenarioHit(int Piece, long StartSample, float LevelDb, flo
 /// <param name="LevelDb">Level of the hit (or of the bleed) in this mic, dBFS.</param>
 /// <param name="Label">pt-BR description.</param>
 public sealed record ExpectedEvent(int Piece, long SampleIndex, bool ExpectTrigger, ExpectationKind Kind,
-    float LevelDb, string Label);
+    float LevelDb, string Label)
+{
+    /// <summary>Matching tolerance for this expectation (ms); null = the run's tolerance. Used for hits just above
+    /// the threshold, whose onset is legitimately detected late (at the first crest of the waveform).</summary>
+    public double? ToleranceMs { get; init; }
+}
 
 /// <summary>Bleed path: a copy of <paramref name="FromPiece"/>'s hits leaks into mic <paramref name="ToMic"/>.</summary>
 /// <param name="FromPiece">Source piece.</param>
@@ -50,6 +58,9 @@ public sealed class KitScenario
 
     /// <summary>Common block boundary of 32/64/128/256/480-sample blocks (LCM = 3840 samples = 80 ms @ 48 kHz).</summary>
     public const int CommonBoundary = 3840;
+
+    /// <summary>Tolerance (ms) of hits within ~3 dB of the threshold (see the soft floor-tom hits).</summary>
+    public const double NearThresholdToleranceMs = 8.0;
 
     public int SampleRate { get; }
     public int Seed { get; }
@@ -106,10 +117,10 @@ public sealed class KitScenario
         float[] mid = [-6f, -6f, -4f, -5f];
 
         void Hit(int p, long at, float db, float sus, string label, bool expectTrigger = true,
-            ExpectationKind kind = ExpectationKind.Hit)
+            ExpectationKind kind = ExpectationKind.Hit, double? toleranceMs = null)
         {
             hits.Add(new ScenarioHit(p, at, db, sus, label));
-            expected.Add(new ExpectedEvent(p, at, expectTrigger, kind, db, label));
+            expected.Add(new ExpectedEvent(p, at, expectTrigger, kind, db, label) { ToleranceMs = toleranceMs });
         }
 
         for (int p = 0; p < 4; p++)
@@ -141,7 +152,20 @@ public sealed class KitScenario
                 expectTrigger: false, kind: ExpectationKind.DoubleInsideLockout);
         }
 
-        int length = (int)S(14.5);
+        // Soft floor-tom hits around the -16 dBFS default: -10/-13/-15 must fire; -18 is below the threshold and is
+        // the documented cost of raising the floor tom above the kick bleed (expected miss, known limitation).
+        // Hits within ~3 dB of the threshold only cross it at the first crest of the tone (measured: -13 dBFS ≈ 4.5 ms,
+        // -15 dBFS ≈ 5.0 ms after the hit start), so they get an explicit 8 ms tolerance; the error is still reported.
+        float[] softFloor = [-10f, -13f, -15f];
+        for (int i = 0; i < softFloor.Length; i++)
+            Hit(3, S(14.0 + 0.5 * i), softFloor[i], 140f,
+                softFloor[i] > -12f ? $"surdo suave {softFloor[i]:0} dBFS (acima do limiar de -16)"
+                                    : $"surdo suave {softFloor[i]:0} dBFS (perto do limiar: detecção na 1ª crista, tolerância 8 ms)",
+                toleranceMs: softFloor[i] > -12f ? null : NearThresholdToleranceMs);
+        Hit(3, S(15.5), -18f, 140f, "surdo suave -18 dBFS: abaixo do limiar de -16, não dispara (limitação conhecida)",
+            expectTrigger: false, kind: ExpectationKind.BelowThreshold);
+
+        int length = (int)S(16.5);
         var mics = new float[4][];
         for (int p = 0; p < 4; p++) mics[p] = SyntheticSignals.Noise(length, -60f, seed * 10 + p);
 

@@ -98,6 +98,123 @@ public class HarnessTests
         Assert.Contains(rep.Rows, r => r.Status == HarnessStatus.WrongOutput && r.DetectedOutputDesk == 2);
     }
 
+    // ---- Output attribution (review of 75dc01e): audio must START on the routed output only. ----
+
+    private static (KitScenario Sc, HarnessResult Good) GoodRun()
+    {
+        var sc = KitScenario.Generate(1);
+        var good = KitHarness.RunOffline(sc);
+        Assert.True(good.Report.Passed, good.Report.SummaryTable());
+        return (sc, good);
+    }
+
+    private static HarnessReport Reevaluate(KitScenario sc, HarnessResult good, SortedDictionary<int, float[]> physical)
+    {
+        var hits = good.Events.Where(e => !e.Event.IsManualTest).Select(KitHarness.ToHit).ToList();
+        return ScenarioEvaluator.Evaluate(sc, hits, physical, good.InputDesk, good.OutputDesk);
+    }
+
+    private static SortedDictionary<int, float[]> CopyOutputs(HarnessResult r) =>
+        new(r.PhysicalOutputs.ToDictionary(kv => kv.Key, kv => (float[])kv.Value.Clone()));
+
+    [Fact]
+    public void ProbeKickReturnCopiedOntoUsb2Fails()
+    {
+        var (sc, good) = GoodRun();
+        var physical = CopyOutputs(good);
+        for (int i = 0; i < sc.Length; i++) physical[2][i] += physical[1][i];   // kick ALSO on the snare's output
+        var rep = Reevaluate(sc, good, physical);
+        Assert.False(rep.Passed);
+        var kick = rep.Rows.Where(r => r.Piece == 0 && r.ExpectTrigger).ToList();
+        Assert.All(kick, r => Assert.Equal(HarnessStatus.WrongOutput, r.Status));
+        Assert.All(kick, r => Assert.Equal(2, r.DetectedOutputDesk));
+        Assert.Equal(kick.Count, rep.Summaries[0].WrongOutput);
+    }
+
+    [Fact]
+    public void ProbeConstantToneInsteadOfVoicesFails()
+    {
+        var (sc, good) = GoodRun();
+        var physical = CopyOutputs(good);
+        physical[1] = Enumerable.Repeat(0.01f, sc.Length).ToArray();        // -40 dBFS, no kick voices at all
+        var rep = Reevaluate(sc, good, physical);
+        Assert.False(rep.Passed);
+        Assert.All(rep.Rows.Where(r => r.Piece == 0 && r.ExpectTrigger), r => Assert.Equal(HarnessStatus.WrongOutput, r.Status));
+        Assert.Contains(rep.Rows, r => r.Piece == 0 && r.Status == HarnessStatus.Extra && r.Label.Contains("sem disparo"));
+    }
+
+    [Fact]
+    public void RingingEarlierVoiceDoesNotCountAsTheNewOnset()
+    {
+        var (sc, good) = GoodRun();
+        var physical = CopyOutputs(good);
+        // Remove only the second voice of the kick double (+120 ms): the first voice is still ringing there.
+        var second = sc.Expected.Single(e => e.Piece == 0 && e.Label.StartsWith("dupla fora do intervalo (2ª", StringComparison.Ordinal));
+        var ev = good.Events.Single(e => e.Piece == DrumPiece.Kick && Math.Abs(e.Event.SampleIndex - second.SampleIndex) < 480).Event;
+        var s = sc.Samples[0];
+        for (int k = 0; k < s.Length && ev.PlaybackSampleIndex + k < sc.Length; k++)
+            physical[1][ev.PlaybackSampleIndex + k] -= s[k] * ev.Gain;
+        Assert.True(Math.Abs(physical[1][ev.PlaybackSampleIndex + 10]) > 1e-3f, "a voz anterior deveria continuar soando");
+        var rep = Reevaluate(sc, good, physical);
+        var row = rep.Rows.Single(r => r.Piece == 0 && r.ExpectedSample == second.SampleIndex);
+        Assert.Equal(HarnessStatus.WrongOutput, row.Status);
+        Assert.Equal(1, rep.Summaries[0].WrongOutput);
+        Assert.False(rep.Passed);
+    }
+
+    [Fact]
+    public void StrayAudioOnACorrectOutputIsExtra()
+    {
+        var (sc, good) = GoodRun();
+        var physical = CopyOutputs(good);
+        int at = (int)(0.25 * sc.SampleRate);                                // silence before the first hit
+        for (int k = 0; k < 480; k++) physical[3][at + k] += 0.05f * MathF.Sin(k * 0.3f);
+        var rep = Reevaluate(sc, good, physical);
+        Assert.False(rep.Passed);
+        var extra = Assert.Single(rep.Rows, r => r.Status == HarnessStatus.Extra);
+        Assert.Equal(2, extra.Piece);                                         // USB 3 = Tom in the Simulação profile
+        Assert.InRange(extra.DetectedSample!.Value, at - 48, at + 48);
+    }
+
+    [Fact]
+    public void CorrectRunHasNoUnexplainedOutputAudio()
+    {
+        var (_, good) = GoodRun();
+        Assert.DoesNotContain(good.Report.Rows, r => r.Label.Contains("sem disparo"));
+        Assert.All(good.Report.Rows.Where(r => r.ExpectTrigger), r => Assert.Equal(r.OutputDesk, r.DetectedOutputDesk));
+    }
+
+    [Fact]
+    public void SoftFloorTomHitsFireAndBelowThresholdIsKnownLimitation()
+    {
+        var (sc, good) = GoodRun();
+        Assert.Equal(-16f, sc.ThresholdDb[3]);
+        var soft = good.Report.Rows.Where(r => r.Piece == 3 && r.Label.StartsWith("surdo suave", StringComparison.Ordinal)).ToList();
+        Assert.Equal(4, soft.Count);
+        foreach (var db in new[] { "-10", "-13", "-15" })
+            Assert.Equal(HarnessStatus.Ok, Assert.Single(soft, r => r.Label.StartsWith($"surdo suave {db} ", StringComparison.Ordinal)).Status);
+        var below = Assert.Single(soft, r => r.Label.StartsWith("surdo suave -18 ", StringComparison.Ordinal));
+        Assert.Equal(HarnessStatus.KnownLimitation, below.Status);
+        Assert.Null(below.DetectedSample);
+        Assert.Equal(1, good.Report.Summaries[3].KnownLimitations);
+        Assert.True(good.Report.Passed); // a known limitation does not fail the run
+        // The kick bleed case is still there and still silent on the floor tom.
+        Assert.Contains(good.Report.Rows, r => r.Piece == 3 && r.Label.StartsWith("vazamento", StringComparison.Ordinal) && r.Status == HarnessStatus.Ok);
+    }
+
+    [Fact]
+    public void EventsAndRowsAreOrderedBySampleIndex()
+    {
+        var (_, good) = GoodRun();
+        var idx = good.Events.Select(e => e.Event.SampleIndex).ToList();
+        Assert.Equal(idx.OrderBy(x => x), idx);
+        var simultaneous = good.Events.GroupBy(e => e.Event.SampleIndex).Where(g => g.Count() > 1).ToList();
+        Assert.NotEmpty(simultaneous);
+        Assert.All(simultaneous, g => Assert.Equal(g.Select(e => (int)e.Piece).OrderBy(x => x), g.Select(e => (int)e.Piece)));
+        var rowKeys = good.Report.Rows.Select(r => r.ExpectedSample ?? r.DetectedSample ?? 0).ToList();
+        Assert.Equal(rowKeys.OrderBy(x => x), rowKeys);
+    }
+
     [Fact]
     public void WritesAllReportFiles()
     {

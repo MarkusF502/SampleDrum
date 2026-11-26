@@ -120,21 +120,33 @@ public static class KitHarness
             }
             while (engine.TryDequeueEvent(out var e)) events.Add(e);
         }
-        return Evaluate(sc, o, validation, routing, byPiece, physical, events, block, "offline (determinístico)");
+        return Evaluate(sc, o, validation, routing, byPiece, physical, events, block, "offline (determinístico)", engine.Settings);
     }
 
-    /// <summary>Builds the result/report from captured returns and events (also used by the real-time host capture).</summary>
+    /// <summary>
+    /// Builds the result/report from captured returns and events (also used by the real-time host capture).
+    /// Events are re-ordered by sample index (then piece): KitEngine queues the events of one block grouped by piece.
+    /// <paramref name="settings"/> gives the polyphony used to rebuild the expected returns (default: Core defaults).
+    /// </summary>
     public static HarnessResult Evaluate(KitScenario sc, HarnessOptions o, RoutingValidation validation, ResolvedRouting routing,
-        float[][] byPiece, SortedDictionary<int, float[]> physical, IReadOnlyList<KitEvent> events, int blockSize, string mode)
+        float[][] byPiece, SortedDictionary<int, float[]> physical, IReadOnlyList<KitEvent> events, int blockSize, string mode,
+        KitSettings? settings = null)
     {
-        var hits = events.Where(e => !e.Event.IsManualTest).Select(ToHit).ToList();
+        var sorted = events.OrderBy(e => e.Event.SampleIndex).ThenBy(e => (int)e.Piece).ToList();
+        var hits = sorted.Where(e => !e.Event.IsManualTest).Select(ToHit).ToList();
+        var manual = sorted.Where(e => e.Event.IsManualTest).Select(ToHit).ToList();
         var inDesk = DrumPieces.All.Select(p => routing.InputIndex(p) + 1).ToArray();
         var outDesk = DrumPieces.All.Select(p => routing.OutputIndex(p) + 1).ToArray();
-        var report = ScenarioEvaluator.Evaluate(sc, hits, physical, inDesk, outDesk, o.ToleranceMs);
+        var limits = DrumPieces.All.Select(p =>
+        {
+            var t = (settings ?? KitSettings.Default)[p].Trigger.Normalized();
+            return new VoiceLimit(t.MaxVoices, (int)Math.Round(t.StealFadeMs * 0.001 * sc.SampleRate));
+        }).ToArray();
+        var report = ScenarioEvaluator.Evaluate(sc, hits, physical, inDesk, outDesk, o.ToleranceMs, manual, sc.Samples, limits);
         return new HarnessResult
         {
             Scenario = sc, Validation = validation, Routing = routing, Report = report, ReturnsByPiece = byPiece,
-            PhysicalOutputs = physical, Events = events, BlockSize = blockSize, Mode = mode,
+            PhysicalOutputs = physical, Events = sorted, BlockSize = blockSize, Mode = mode,
         };
     }
 

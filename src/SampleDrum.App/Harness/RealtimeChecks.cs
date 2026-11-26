@@ -60,7 +60,7 @@ public static class RealtimeChecks
         var byPiece = cap.ByPiece.Select(a => Fit(a, sc.Length)).ToArray();
         var physical = new SortedDictionary<int, float[]>(cap.Physical.ToDictionary(kv => kv.Key, kv => Fit(kv.Value, sc.Length)));
         return KitHarness.Evaluate(sc, o, validation, routing, byPiece, physical, events, block,
-            $"tempo real (FakeAudioHost, velocidade {speed:0.#}x{(preview ? ", com prévia" : "")})");
+            $"tempo real (FakeAudioHost, velocidade {speed:0.#}x{(preview ? ", com prévia" : "")})", engine.Settings);
     }
 
     private static float[] Fit(float[] a, int len) => a.Length == len ? a : a.Length > len ? a[..len] : a.Concat(new float[len - a.Length]).ToArray();

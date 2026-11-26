@@ -92,9 +92,13 @@ WAVs de entrada podem ter qualquer taxa e ser mono ou estéreo: são convertidos
 | `relatorio.md` | o mesmo em Markdown, com o resumo por peça e o cabeçalho da rodada (bloco, semente, roteamento, limiares) |
 | `tempo-real\…` | os mesmos arquivos da rodada em tempo real (`--realtime`/`--play`) |
 
-Status no relatório: **ok** (disparou onde devia, na saída certa; ou não disparou onde não devia), **faltando**
-(devia disparar e não disparou), **extra** (disparou sem dever: vazamento, segunda batida dentro do intervalo mínimo
-ou disparo inesperado) e **saída-errada** (disparou, mas o sample não saiu na saída USB daquela peça).
+Status no relatório: **ok** (disparou onde devia e o sample começou só na saída certa; ou não disparou onde não
+devia), **faltando** (devia disparar e não disparou), **extra** (disparou sem dever: vazamento, segunda batida
+dentro do intervalo mínimo ou disparo inesperado; ou áudio que começa numa saída sem nenhum disparo que o explique),
+**saída-errada** (disparou, mas o sample não começou na saída USB daquela peça, ou começou também em outra saída) e
+**limitação conhecida** (caso documentado que não reprova a rodada, por exemplo o golpe do surdo abaixo do limiar;
+aparece numa seção própria do `relatorio.md`). Os eventos e as linhas saem em ordem de amostra (o motor entrega os
+eventos de um mesmo bloco agrupados por peça; o harness reordena).
 
 ## Como ouvir a prévia
 
@@ -112,13 +116,25 @@ ou disparo inesperado) e **saída-errada** (disparou, mas o sample não saiu na 
    a faixa estéreo/multicanal em mono). Cada canal é uma saída USB do PC: canal 1 = USB 1 (→ Card In 1 na mesa).
 2. Cada batida do bumbo em `mic-bumbo.wav` deve ter um sample **só no canal 1**; caixa só no 2; tom só no 3; surdo só
    no 4. Nas batidas simultâneas aparecem vários canais ao mesmo tempo, cada um com o seu sample (timbres diferentes).
-3. O relatório já faz essa conferência automaticamente: qualquer sample que saia na saída errada vira **saída-errada**
-   e o resultado geral falha.
+3. O relatório já faz essa conferência automaticamente, por **reconstrução** e não por "tem algum som ali":
+   * cada disparo vira uma voz esperada (ganho do evento × sample da peça, a partir da amostra em que começou a
+     tocar, com a mesma regra de polifonia/fade do motor); a saída esperada de cada USB é a soma das vozes das
+     peças roteadas para ela;
+   * para cada disparo, em cada saída, tira-se do áudio todas as **outras** vozes esperadas e mede-se a correlação
+     do que sobra com esta voz nos primeiros 3 ms: na saída da peça tem de dar ≈ 1 (um começo **novo** deste sample;
+     uma voz anterior ainda soando não conta) e em qualquer outra saída tem de dar ≈ 0. Se não, **saída-errada**
+     (com a saída onde ele apareceu, quando há);
+   * por fim procura-se, em cada saída, áudio que **começa** (subida de +9 dB acima de −60 dBFS) e que não é
+     explicado por nenhum disparo: vira **extra** ("áudio começando na saída USB n sem disparo que o explique").
+   Testes que garantem isso (`HarnessTests`): retorno do bumbo copiado também na USB 2 → todas as linhas do bumbo
+   **saída-errada** (USB 2); tom constante de −40 dBFS na USB 1 sem as vozes do bumbo → bumbo **saída-errada** +
+   **extra**; segunda voz de uma dupla removida (a primeira ainda soando) → **saída-errada** naquela batida;
+   rajada solta numa saída certa → **extra**.
 4. Os arquivos `retorno-<peça>.wav` são os mesmos sinais separados por peça (útil para escutar uma peça de cada vez).
 
 ## O cenário sintético
 
-Quatro trilhas de microfone a 48 kHz, 14,5 s, determinísticas pela semente (ruído de fundo −60 dBFS em cada trilha):
+Quatro trilhas de microfone a 48 kHz, 16,5 s, determinísticas pela semente (ruído de fundo −60 dBFS em cada trilha):
 
 | Trecho | O que testa |
 |---|---|
@@ -128,6 +144,8 @@ Quatro trilhas de microfone a 48 kHz, 14,5 s, determinísticas pela semente (ru�
 | 6,6 / 7,2 / 7,8 s | batidas simultâneas na mesma amostra: 2 peças, 3 peças, 4 peças |
 | 8,5–10,7 s | duplas por peça com 120 ms (fora do intervalo mínimo): as duas devem disparar |
 | 11,3–13,4 s | duplas por peça com 20 ms (dentro do intervalo mínimo): só a primeira deve disparar |
+| 14,0 / 14,5 / 15,0 s | surdo suave a −10, −13 e −15 dBFS (acima do limiar de −16): devem disparar |
+| 15,5 s | surdo suave a −18 dBFS (abaixo do limiar): **não** dispara — aparece como **limitação conhecida** |
 | o tempo todo | vazamento controlado: bumbo → microfone do surdo (−18 dB, +1 ms) e caixa → microfone do tom (−15 dB, +0,5 ms), que **não** devem disparar surdo/tom |
 
 Cada peça tem um timbre de microfone e um sample sintético diferentes (bumbo com varredura 120→50 Hz, caixa com
@@ -142,6 +160,17 @@ medido com as sementes 1, 2, 3 e 7). Com −16 esse vazamento fica 5 dB abaixo e
 Isto é uma **nota de calibração para o ensaio**: o motor não tem "gate" entre canais na v2, então o limiar de cada
 tom precisa ficar acima do vazamento mais forte que o microfone dele recebe; os valores reais saem das gravações da
 igreja. Com `--mics` (seus WAVs) o harness também usa os padrões do Core.
+
+**O preço do −16 no surdo (medido no harness, sementes 1, 2, 3, 4, 5, 7 e 11, blocos 64/128/256/480):**
+
+* margem de 5 dB sobre o vazamento sintético do bumbo (≈ −21 dBFS no microfone do surdo): não dispara;
+* golpes suaves do surdo **a −16 dBFS ou abaixo não disparam** (o de −18 dBFS do cenário fica como limitação
+  conhecida); acima disso disparam (−10, −13 e −15 dBFS);
+* golpes até ~3 dB acima do limiar só cruzam o limiar na primeira crista da onda: −13 dBFS é detectado ≈ 4,5 ms
+  depois do início e −15 dBFS ≈ 5,0 ms depois (−10 dBFS ≈ 0,8 ms). Por isso essas duas expectativas usam tolerância
+  de 8 ms (as demais 5 ms); o erro aparece no relatório (é ele que leva o "erro máx." do surdo a ≈ 5 ms);
+* o valor final sai das gravações da igreja: se o vazamento real do bumbo for mais fraco, dá para baixar o limiar do
+  surdo e recuperar os golpes suaves; se for mais forte, subir.
 
 ## Simulação na janela (`--simulation`) e API para a interface
 
@@ -172,30 +201,36 @@ Pacote `NAudio.WinMM` **3.3.0** (MIT), conferido no XML do pacote e no código-f
   consumidor); a thread do `WaveOut` lê dele. Se faltar dado, toca silêncio e conta um underrun; se o anel encher,
   o bloco novo é descartado e conta um overrun. O motor nunca espera pela placa de som.
 
-## Verificações executadas (25/11/2026, branch `ao/asio-app/root`, Release, neste PC sem X32 e sem ASIO)
+## Verificações executadas (branch `ao/asio-app/root`, Release, neste PC sem X32 e sem ASIO)
+
+Última rodada em 26/11/2026, depois das correções da revisão (atribuição de saída por reconstrução, golpes
+suaves do surdo, ordem dos eventos); as linhas marcadas "25/11" não foram repetidas nesta rodada.
 
 | Verificação | Resultado |
 |---|---|
 | `dotnet build SampleDrum.sln -c Release` | 0 avisos, 0 erros |
-| `dotnet test SampleDrum.sln -c Release` | Core: 215/215 (inclui `HarnessTests`); App (Windows): 7/7 (`HarnessRealtimeTests`) |
-| `SampleDrum.App.exe --selftest` | 11/11 OK em ~7 s, código 0 |
+| `dotnet test SampleDrum.sln -c Release` (2 vezes) | App (Windows): 7/7 nas duas. Core: 252/256 nas duas — os 21 `HarnessTests` passam; falham as 4 sementes de `KitEngineTests.DefaultKit_PassesSyntheticScenario_KickBleedDoesNotFireFloorTom` (arquivo do worker multicanal), que confere todo o gabarito com tolerância fixa de ±2 ms e ainda não usa a tolerância de 8 ms dos golpes do surdo perto do limiar (correção de 1 linha pedida) |
+| `SampleDrum.App.exe --selftest` | 11/11 OK em ~9 s, código 0 |
 | `--harness <pasta>` com bloco 64, 128, 256 e 480 | OK nos quatro, código 0 |
 | `--harness <pasta> --realtime` (tempo real 1×) | offline OK e tempo real OK, disparos idênticos ao offline |
-| `--harness <pasta> --play` | OK; saída padrão aberta, 0 underruns, 0 descartes (o áudio não foi escutado por quem rodou) |
-| `--harness --mics a b c d` e `--mics4 mics-4ch.wav --block 64` | rodaram até o fim (sem gabarito), código 0 |
-| `--harness ... --block abc` | mensagem de erro em português, código 2 |
-| `SampleDrum.Offline --kit <pasta> --block 480 --seed 7` | OK, código 0 |
-| `dotnet publish ... -r win-x64 --self-contained` + exe publicado: `--harness --realtime`, `--selftest`, `--list-drivers` | OK, OK, "nenhum driver ASIO instalado" |
-| exe publicado com `--simulation` | abre e fecha sem erro (nesta data a janela ainda não usava a opção; ligada depois pelo worker multicanal, ver abaixo) |
+| cenário em 7 sementes (1, 2, 3, 4, 5, 7, 11) × blocos 64/128/256/480, avaliador novo | 28/28 OK (nenhum alarme falso da nova verificação de saída) |
+| `--harness <pasta> --play` (25/11) | OK; saída padrão aberta, 0 underruns, 0 descartes (o áudio não foi escutado por quem rodou) |
+| (25/11) `--harness --mics a b c d` e `--mics4 mics-4ch.wav --block 64` | rodaram até o fim (sem gabarito), código 0 |
+| (25/11) `--harness ... --block abc` | mensagem de erro em português, código 2 |
+| (25/11) `SampleDrum.Offline --kit <pasta> --block 480 --seed 7` | OK, código 0 |
+| (25/11) `dotnet publish ... -r win-x64 --self-contained` + exe publicado: `--harness --realtime`, `--selftest`, `--list-drivers` | OK, OK, "nenhum driver ASIO instalado" |
+| (25/11) exe publicado com `--simulation` | abre e fecha sem erro (nesta data a janela ainda não usava a opção; ligada depois pelo worker multicanal, ver abaixo) |
 
 Resumo por peça do cenário sintético (semente 1, bloco 256; igual no offline e no tempo real):
 
-| Peça | Entrada | Saída | Esperados | Silêncios esperados | Detectados | ok | faltando | extra | saída-errada | erro médio (ms) | erro máx (ms) | Resultado |
-|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
-| Bumbo | USB 3 | USB 1 | 9 | 1 | 9 | 10 | 0 | 0 | 0 | 0.02 | 0.17 | OK |
-| Caixa | USB 4 | USB 2 | 9 | 1 | 9 | 10 | 0 | 0 | 0 | 0.01 | 0.04 | OK |
-| Tom | USB 5 | USB 3 | 8 | 9 | 8 | 17 | 0 | 0 | 0 | 0.01 | 0.02 | OK |
-| Surdo | USB 6 | USB 4 | 7 | 10 | 7 | 17 | 0 | 0 | 0 | 0.31 | 0.60 | OK |
+| Peça | Entrada | Saída | Esperados | Silêncios esperados | Detectados | ok | faltando | extra | saída-errada | limitação conhecida | erro médio (ms) | erro máx (ms) | Resultado |
+|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| Bumbo | USB 3 | USB 1 | 9 | 1 | 9 | 10 | 0 | 0 | 0 | 0 | 0.02 | 0.17 | OK |
+| Caixa | USB 4 | USB 2 | 9 | 1 | 9 | 10 | 0 | 0 | 0 | 0 | 0.01 | 0.04 | OK |
+| Tom | USB 5 | USB 3 | 8 | 9 | 8 | 17 | 0 | 0 | 0 | 0 | 0.01 | 0.02 | OK |
+| Surdo | USB 6 | USB 4 | 10 | 11 | 10 | 20 | 0 | 0 | 0 | 1 | 1.24 | 4.98 | OK |
+
+(O "erro máx." de ≈ 5 ms do surdo é o golpe de −15 dBFS, 1 dB acima do limiar: ver "O preço do −16 no surdo".)
 
 As verificações do `--selftest` (as mesmas de `HarnessTests`): cada entrada dispara a peça e a saída esperadas;
 2, 3 e 4 peças disparam juntas; desativar uma peça silencia só o retorno dela; o teste manual de cada peça chega só
@@ -210,7 +245,11 @@ repositório): limiar −24 em todas as peças e também o antigo padrão −22 
 vira **extra** no surdo; por isso o padrão passou a −16), saídas 1 e 2 trocadas (**saída-errada** em bumbo e caixa) e surdo desligado (todas as
 batidas do surdo **faltando**). O teste automático `HarnessTests.EvaluatorFlagsMissingExtraAndWrongOutput` mantém
 essa garantia: remove as detecções da caixa, inventa um disparo do tom e manda o áudio do bumbo para a USB 2, e exige
-**faltando**, **extra** e **saída-errada**.
+**faltando**, **extra** e **saída-errada**. A revisão independente mostrou que a verificação de saída antiga ("tem
+algum som acima de −60 dBFS nos 3 ms seguintes") aprovava o bumbo copiado também na USB 2 e um tom constante no lugar
+das vozes; os testes `ProbeKickReturnCopiedOntoUsb2Fails`, `ProbeConstantToneInsteadOfVoicesFails`,
+`RingingEarlierVoiceDoesNotCountAsTheNewOnset` e `StrayAudioOnACorrectOutputIsExtra` reproduzem esses casos e agora
+exigem a reprovação.
 
 ## Limitações
 
