@@ -1,6 +1,6 @@
 # Pesquisa e plano: painel de controle pelo celular (SampleDrum v2 → próxima entrega)
 
-Data: 2026-11-25. Escopo: **só pesquisa e plano**, sem implementação. Etiquetas: **[fonte]** = documentação ou página citada; **[observação]** = medido ou testado neste PC de desenvolvimento; **[inferência]** = conclusão nossa, a validar.
+Data: 2026-11-25; atualizado em 2026-11-26 para o Core em `ao/sampledrum-core/root` @ `3a4efd5` (seções 5 a 9). Escopo: **só pesquisa e plano**, sem implementação do servidor nem da página. Etiquetas: **[fonte]** = documentação ou página citada; **[observação]** = medido ou testado neste PC de desenvolvimento; **[inferência]** = conclusão nossa, a validar.
 
 **Objetivo:** pelo navegador do celular, na mesma rede do PC da transmissão, o operador escolhe um sample por peça ou aplica um preset de kit inteiro com o app rodando. O áudio continua sendo processado só no PC e **nunca depende da rede**.
 
@@ -122,21 +122,22 @@ Exemplo de `state`:
 - **Idempotência:** o celular gera `clientOpId` (UUID). Se a rede cair e o POST for repetido com o mesmo id, ele devolve a mesma operação em vez de enfileirar outra.
 - **Teste pelo celular:** o teste toca o sample **na mesa**, então pode sair no PA ou na transmissão. Proposta: **desligado por padrão** e habilitado no PC ("Permitir teste pelo celular"); no celular, botão com confirmação.
 
-## 5. Semântica da troca, de ponta a ponta (sobre o contrato Core v2)
+## 5. Semântica da troca, de ponta a ponta (como o Core faz em `3a4efd5`)
 
-1. O comando (do PC ou do celular) entra no **`KitController`**: uma fila única (`Channel<T>`, um consumidor) **fora** da thread de áudio.
-2. **Preset inteiro:** `SampleLibrary.PrepareAsync(preset, 48000, ct)` carrega, reamostra e sanitiza **todas** as peças. Se **alguma** peça falhar, a operação inteira vira `failed` (com o erro por peça) e **o kit ativo não é tocado**. Kit pela metade nunca existe.
-3. **Uma peça:** prepara só aquela peça e monta um `PreparedKit` novo **reaproveitando os arrays já preparados** das outras peças do kit ativo (sugestão de API na seção 9).
-4. `KitEngine.ApplyKit(prepared)` faz **uma troca de referência**, que vale no **início do próximo bloco**. Os golpes seguintes usam o sample novo; as vozes que já estão tocando terminam com o sample antigo (contrato). Até esse momento, o áudio segue com o kit anterior.
-5. Em seguida: `version++`, o `AppConfig` é salvo (escrita atômica tmp + move, com sample e ganho por peça e o nome do preset ativo), e o novo estado é transmitido por SSE e para a UI do PC.
-6. **Concorrência:** fila serial, **o último a escrever vence**, na ordem de chegada. Se chegar um pedido mais novo para o mesmo escopo enquanto outro ainda prepara, o anterior termina como `superseded` (preparado, mas não aplicado), para evitar duas trocas audíveis seguidas.
-   - `baseVersion` não bloqueia. Se estiver velho, a operação ainda é aplicada, mas o resultado vem marcado como `conflict: true` e o celular mostra "alterado por outro dispositivo" [inferência: travar seria pior ao vivo].
-7. **Partida do app:** o kit salvo é preparado e aplicado **antes** de o áudio começar. O kit continua começando **desativado** (contrato).
-8. **Memória e GC:** um kit de 4 samples de ~1 s ocupa ~0,8 MB, que vai para o LOH. Kits antigos ficam para o GC quando as vozes terminam. **Risco:** pausa de GC gen2 durante uma troca. Medir com o harness; mitigação possível: `GCSettings.LatencyMode = SustainedLowLatency` enquanto o áudio roda [inferência].
+1. O comando (do PC ou do celular) entra no **`KitController`**: uma fila serial (`Channel`, um único worker) **fora** da thread de áudio. Cada chamada devolve um `KitOperation` com `Id` (Guid), `Snapshot` (status `Queued → Preparing → Applied | Failed | Superseded`, erros, `ResultVersion`) e `Completion` (resolve sempre, inclusive em falha) [fonte: `Kit/KitController.cs`].
+2. **Preset inteiro** (`ApplyPreset`): `SampleLibrary.PrepareAsync` carrega, reamostra e sanitiza **todas** as peças. Se **alguma** falhar, a operação vira `Failed` com o erro por peça e **o kit ativo não é tocado** [fonte; observação: probe da revisão].
+3. **Uma peça** (`SetPieceSample(id)` para o celular, `SetPieceSamplePath(path)` só para o seletor do PC): prepara só aquela peça e reaproveita os arrays das outras (`PreparePieceAsync` + `PreparedKit.WithPiece`). Uma troca de peça zera o `PresetId` (vira seleção personalizada).
+4. `KitEngine.ApplyKit` faz **uma troca de referência**, que vale no **início do próximo bloco**. Os golpes seguintes usam o sample novo e as vozes que já tocam terminam com o antigo. Sample rate diferente → `Failed`, motor intacto. `Applied` quer dizer "entregue ao motor" (também com o áudio parado); a confirmação de que a thread de áudio pegou a troca é `KitEngine.AppliedKitGeneration`. `Reset()` aplica um kit pendente. Ganhos e detecção do preset entram **por cima da calibração atual**, e duas trocas antes de um bloco não perdem ganhos [fonte; observação: re-check final].
+5. Cada operação aplicada incrementa `Version` uma vez e dispara `StateChanged` (sem argumentos, na thread do worker, fora de locks); quem escuta lê `Snapshot` (`KitStateSnapshot`: `Version`, `KitEnabled`, `ActivePresetId`, por peça `SampleId`, `SamplePath`, ganho, `Enabled`, `Settings`).
+6. **Concorrência:** fila serial; o *supersede* é **direcional**: troca de kit inteiro cancela trocas de kit e de peça mais antigas; troca de peça cancela só trocas antigas da **mesma** peça (nunca um preset pendente); habilitar/ganho/ajustes/kit-ativo cancelam o mesmo tipo para o mesmo alvo. O cancelado nunca chega ao motor, mesmo se já estava preparando.
+   - `baseVersion` e `clientOpId` **não existem no Core**: ficam no adaptador web (seção 9). `baseVersion` não bloqueia; se estiver velho, a resposta leva `conflict: true` e o celular mostra "alterado por outro dispositivo" [inferência: travar seria pior ao vivo].
+7. **Pedidos inválidos** (ajustes sem `Trigger`, ganho não finito, id fora da biblioteca) viram `Failed` com código estável (`InvalidArgument`, `OutsideLibrary`); exceção inesperada vira `Failed`/`Internal` e o worker continua [observação: re-check final].
+8. **Partida do app:** o kit salvo volta como **uma** operação de kit inteiro só com samples (`AppConfig.ToStartupPreset`), mantendo o `ActivePresetId` se as peças ainda batem com o arquivo do preset, **antes** de o áudio começar. O kit continua começando **desativado**.
+9. **Memória e GC:** um kit de 4 samples de ~1 s ocupa ~0,8 MB, que vai para o LOH. Kits antigos ficam para o GC quando as vozes terminam. **Risco:** pausa de GC gen2 durante uma troca. Medir com o harness; mitigação possível: `GCSettings.LatencyMode = SustainedLowLatency` enquanto o áudio roda [inferência].
 
 ## 6. Sincronização PC ↔ celular e queda do Wi-Fi
 
-- **Fonte única de verdade:** o `KitController` no app. A UI do PC **não** chama o `KitEngine` direto para trocar o kit; ela passa pelo mesmo controlador e recebe o mesmo evento `StateChanged(version, snapshot)` (repassado para a thread da UI).
+- **Fonte única de verdade:** um único `KitController` durante toda a execução (a pasta de samples muda por `SetLibraryFolder`, sem recriar o controlador, então `Version` nunca volta). A UI do PC já passa por ele para samples, presets, ajustes e ativações; só `RequestTest` e `Reset` (com o áudio parado) tocam o motor direto. `StateChanged` chega na thread do worker: a UI precisa repassar com `BeginInvoke` e nenhum assinante pode bloquear esperando a UI.
 - **SSE:** na conexão o servidor manda primeiro o `state` completo, com `id: <version>`; depois manda `state` a cada mudança. Na reconexão o navegador reenvia `Last-Event-ID`, e o servidor sempre responde com o retrato completo, sem replay de eventos. É simples e não perde nada [inferência].
 - **Medidor e golpes:** `ReadAndResetInputPeak` e `TryDequeueEvent` são de **consumidor único**. O app tem um único *sampler* (30 Hz) que lê o motor e distribui para a UI do PC e para o hub web. O hub web nunca chama o motor.
 - **Wi-Fi cai:**
@@ -148,10 +149,10 @@ Exemplo de `state`:
 ## 7. Plano de testes
 
 1. **Automáticos sem rede (CI local):**
-   - `KitController` em Core (fila, last-writer-wins, `superseded`, falha sem tocar no kit ativo, versão, persistência) com `PrepareAsync` falso.
+   - Core: **já coberto** em `3a4efd5` (`tests/SampleDrum.Core.Tests/Panel*Tests.cs`: controlador, biblioteca, config, motor, robustez). Falta só o que o adaptador acrescentar.
    - API com `WebApplicationFactory`/`TestServer` [fonte]: pareamento (código certo, errado, expirado, rate limit), Origin/Host inválidos dão 403, cookie revogado dá 401, `sampleId` com `..` dá 400, idempotência por `clientOpId`, SSE envia o `state` inicial e o próximo `version`.
    - Teste de troca de kit **durante o processamento** em blocos de 32 a 1024: as vozes antigas terminam, a troca acontece no início de um bloco e não há alocação no `Process` (já coberto pelo padrão do Core).
-2. **Localhost com o harness:** `SampleDrum.App.exe --simulation` (worker do harness) e `http://localhost:8750` no navegador do PC. Trocar presets durante a bateria simulada e conferir os eventos, a versão e a ausência de *glitch* no medidor de saída.
+2. **Localhost com o harness** (sem mesa): `SampleDrum.App.exe --simulation` abre no perfil Simulação com o kit sintético e **não cria nem altera** o `settings.json` do operador (`AppConfig.SaveSimulationRun`). Abrir `http://localhost:8750` no navegador do PC, trocar presets e peças durante a bateria simulada e conferir eventos, `Version` e ausência de *glitch* no medidor de saída. Antes e depois: `SampleDrum.App.exe --selftest` e `SampleDrum.App.exe --harness <pasta>` (código de saída 0 = ok; ver `docs/harness.md` para o PowerShell).
 3. **Celular no mesmo Wi-Fi (em casa):**
    - Regra de firewall criada com o botão de admin, abertura pelo QR e pareamento.
    - Trocar uma peça e um preset; dois celulares ao mesmo tempo; PC e celular ao mesmo tempo.
@@ -167,13 +168,14 @@ Exemplo de `state`:
 
 | Marco | Conteúdo | Estimativa |
 |---|---|---|
-| M1 Core | `KitController` (fila, versão, ops, eventos) + ajustes de API (seção 9) + testes | 1 dia |
-| M2 `src/SampleDrum.Remote` (net10.0, FrameworkReference AspNetCore) | Host Kestrel inicia/para pelo app, endpoints, SSE, pareamento, store de tokens (hash no `AppConfig`), Origin/Host, rate limit, arquivos embutidos; `tests/SampleDrum.Remote.Tests` com `Microsoft.AspNetCore.Mvc.Testing` | 2 dias |
+| ~~M1 Core~~ | **Feito em `3a4efd5`** (`KitController`, ids da biblioteca, códigos de erro, ids de preset, `AppliedKitGeneration`, esquema `RemotePanel`) | 0 |
+| M1 App: estado e distribuição | `MainForm` assina `StateChanged` (repasse à UI, painéis atualizados pelo `Snapshot`), salva por `AppConfig.Save(path, snapshot)` numa única thread, e um *hub* único lê medidores/eventos do motor e distribui para a UI e para o painel (seção 9) | 0,5–1 dia |
+| M2 `src/SampleDrum.Remote` (net10.0, FrameworkReference AspNetCore) | Host Kestrel inicia/para pelo app, endpoints sobre o `KitController`, SSE, pareamento e tokens (hash em `RemotePanel.PairedDevices`), `clientOpId`/`baseVersion`, Origin/Host, rate limit, arquivos embutidos; `tests/SampleDrum.Remote.Tests` com `Microsoft.AspNetCore.Mvc.Testing` | 2 dias |
 | M3 Página do celular | `wwwroot/` (HTML/CSS/JS puro, pt-BR, botões grandes, modo escuro, faixa offline, confirmações) | 1–1,5 dia |
-| M4 Integração na UI do PC | Seção "Painel do celular" (liga/desliga, URL + QR, código de pareamento, aparelhos autorizados, "Permitir teste pelo celular", botão de firewall `--setup-firewall` elevado, aviso de rede Pública); UI do PC passando pelo `KitController` | 1 dia |
-| M5 Validação | Localhost + harness, celulares reais, documentação `docs/painel-movel.md` (uso) | 0,5–1 dia |
+| M4 Integração na UI do PC | Seção "Painel do celular" (liga/desliga, URL + QR, código de pareamento, aparelhos autorizados, "Permitir teste pelo celular", botão de firewall `--setup-firewall` elevado, aviso de rede Pública) | 1 dia |
+| M5 Validação | Localhost com `--simulation`, celulares reais, documentação de uso | 0,5–1 dia |
 
-**Total ≈ 5,5 a 6,5 dias de worker.**
+**Total ≈ 5 a 6,5 dias de worker** (antes 5,5 a 6,5; o Core saiu do plano, mas a integração do estado no app entrou).
 
 **Riscos:**
 - Topologia do Wi-Fi da igreja (isolamento ou sub-rede diferente).
@@ -189,14 +191,23 @@ Exemplo de `state`:
 4. Quantos celulares devem ser autorizados ao mesmo tempo?
 5. O celular também deve ajustar o **ganho por peça**, ou só escolher samples e presets nesta entrega?
 
-## 9. O que o painel precisa da API Core (a confirmar quando o contrato for publicado)
+## 9. Core (`3a4efd5`): o que já existe e o que falta para o painel
 
-- **Versão do estado** (`long Version`) e um evento `KitChanged` no `KitController`. O motor de áudio não precisa disso.
-- `PreparedKit` composto: `PreparedKit.With(DrumPiece p, PreparedSample s)`, ou `PrepareAsync` de uma peça só, reaproveitando as outras peças já preparadas (evita recarregar 4 WAVs para trocar 1).
-- **Resultado do prepare por peça**, com código de erro estável (`file_not_found`, `unsupported_format`, `too_long`, `outside_library`), além da mensagem em pt-BR.
-- `SampleLibrary` com **id relativo** e resolução segura (`TryResolve(string id, out string fullPath)`, que rejeita caminhos fora da raiz).
-- `ActiveKit` com o nome e o id do preset aplicado (para o `state`) e o `AppConfig` com a lista de aparelhos pareados (nome, hash do token, datas).
-- Manter `ReadAndResetInputPeak` e `TryDequeueEvent` de consumidor único e documentar que o app faz a distribuição.
+**O que já existe no Core (`3a4efd5`)** [fonte: `src/SampleDrum.Core/Kit/*`; observação: revisões e re-check final]:
+- **`KitController`** (único, vive a execução inteira): `SetPieceSample(id)` (celular), `SetPieceSamplePath(path)` (só PC), `ApplyPreset`, `ApplyKit(kit, settings)`, `SetPieceEnabled`, `SetPieceGain`, `SetPieceSettings`, `SetKitEnabled`, `SetLibraryFolder`. Cada chamada devolve `KitOperation` (`Id`, `Snapshot`, `Completion`); `GetOperation(id)` guarda as últimas `OperationHistory` = 256; `Version`, `Snapshot` (`KitStateSnapshot`) e `StateChanged`. *Supersede* direcional (seção 5).
+- **Códigos de erro** `PieceLoadErrorCode`: `FileNotFound`, `UnsupportedFormat`, `TooLong`, `OutsideLibrary`, `IoError`, `InvalidArgument`, `Internal`, além da mensagem pt-BR. Pedido inválido ou exceção vira `Failed`; o worker não morre.
+- **`SampleLibrary`**: `List()` devolve `SampleInfo.Id` (caminho relativo com `/`, pula links simbólicos/junções); `TryResolveInLibrary(id, out path)` rejeita `..`, caminhos absolutos, UNC, `\\?\`, `C:arquivo`, `:ads`, nomes de dispositivo (`CON`, `NUL`, `COM0-9`, `LPT0-9`, `¹²³`) e qualquer link no caminho. `ResolvePath` continua só para o PC.
+- **Presets**: `KitPreset.Id` = nome do arquivo sem `.json` (`Load`/`LoadFolder`); `PreparedKit.PresetId` vai para `Snapshot.ActivePresetId` e é zerado numa troca de peça.
+- **Motor**: `ApplyKit` (taxa errada lança; ganhos/detecção por cima da calibração atual; duas trocas antes de um bloco não perdem ganhos), `ActiveKit` = último kit entregue, `AppliedKitGeneration` = troca já pega pela thread de áudio, `Reset` aplica o pendente.
+- **`AppConfig`**: `RemotePanel` (`Enabled` falso, `Port` 8750, `AllowPhoneTest` falso, `PairedDevices` com `TokenSha256Hex`), `ActivePresetId`, `SamplePath` relativo à pasta de samples quando está dentro dela, gravação atômica (arquivo temporário único + `Move`), `Save(path, snapshot)` e `SaveSimulationRun` (o `--simulation` não cria nem muda a configuração do operador); `ToStartupPreset` restaura o kit e o preset ativo na partida.
+
+**O que falta para o painel** (fora do Core, próxima entrega):
+- **App ouvir o controlador:** hoje o `MainForm` só reage ao `Completion` das operações que ele mesmo fez; uma troca vinda do celular **não** atualizaria os painéis do PC nem seria salva. Assinar `StateChanged`, repassar à UI e persistir por `AppConfig.Save(path, snapshot)` numa única thread (marco M1).
+- **Hub de medidores e golpes:** `ReadAndResetInputPeak` e `TryDequeueEvent` continuam de consumidor único (documentado); o app precisa de um leitor único que distribua para a UI e para o SSE.
+- **Adaptador web** (`SampleDrum.Remote`): mapear `clientOpId` → `KitOperation.Id` (idempotência), calcular `conflict` a partir de `baseVersion`, traduzir `PieceLoadErrorCode` para `problem+json`, procurar o preset pelo `Id` na lista de `LoadFolder` (nunca montar caminho com o texto do celular), e usar só `SetPieceSample(id)`.
+- **Teste pelo celular:** não passa pelo controlador (é `KitEngine.RequestTest`); o adaptador precisa checar `RemotePanel.AllowPhoneTest` antes.
+- **Pareamento e tokens:** só o esquema existe; faltam geração do código, hash/validação do token, `LastSeenUtc`, revogação e limite de tentativas.
+- **Dados de exibição:** nome e duração do sample saem de `ActiveKit[peça]` (`Name`, `Samples.Length`); o último golpe e o medidor vêm do hub, não do `Snapshot`.
 
 ## Fontes
 
