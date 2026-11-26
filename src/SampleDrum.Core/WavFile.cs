@@ -18,6 +18,12 @@ public sealed record WavData(float[] Mono, int SampleRate, int Channels, int Bit
     public int NonFiniteSamples { get; init; }
 }
 
+/// <summary>WAV header information (no audio decoded).</summary>
+public sealed record WavInfo(int SampleRate, int Channels, int BitsPerSample, bool IsFloat, long Frames)
+{
+    public double DurationSeconds => SampleRate > 0 ? (double)Frames / SampleRate : 0;
+}
+
 /// <summary>
 /// Dependency-free RIFF/WAVE reader/writer. Reads PCM 8/16/24/32-bit, IEEE float 32/64-bit and
 /// WAVE_FORMAT_EXTENSIBLE; any channel count is downmixed to mono by averaging.
@@ -198,6 +204,57 @@ public static class WavFile
             output[o] = (float)acc;
         }
         return output;
+    }
+
+    /// <summary>
+    /// Reads only the header (fmt chunk and data size), without decoding the audio. Throws
+    /// <see cref="InvalidDataException"/> / <see cref="NotSupportedException"/> like <see cref="Read(Stream)"/>.
+    /// </summary>
+    public static WavInfo ReadInfo(string path)
+    {
+        using var fs = File.OpenRead(path);
+        using var br = new BinaryReader(fs, Encoding.ASCII, leaveOpen: true);
+        if (ReadTag(br) != "RIFF") throw new InvalidDataException("Arquivo não é RIFF/WAV.");
+        br.ReadUInt32();
+        if (ReadTag(br) != "WAVE") throw new InvalidDataException("Arquivo RIFF não é WAVE.");
+        ushort format = 0, channels = 0, bits = 0, blockAlign = 0;
+        int rate = 0;
+        long dataBytes = -1;
+        while (fs.Position + 8 <= fs.Length)
+        {
+            string id = ReadTag(br);
+            uint size = br.ReadUInt32();
+            long next = fs.Position + size + (size & 1);
+            if (id == "fmt ")
+            {
+                if (size < 16) throw new InvalidDataException($"Chunk 'fmt ' curto demais ({size} bytes; mínimo 16).");
+                format = br.ReadUInt16();
+                channels = br.ReadUInt16();
+                rate = br.ReadInt32();
+                br.ReadInt32();
+                blockAlign = br.ReadUInt16();
+                bits = br.ReadUInt16();
+                if (format == FormatExtensible && size >= 40)
+                {
+                    br.ReadUInt16(); br.ReadUInt16(); br.ReadUInt32();
+                    format = BinaryPrimitives.ReadUInt16LittleEndian(br.ReadBytes(16));
+                }
+            }
+            else if (id == "data")
+            {
+                dataBytes = Math.Min(size, fs.Length - fs.Position);
+            }
+            if (next > fs.Length) break;
+            fs.Position = next;
+        }
+        if (channels == 0 || rate <= 0 || bits == 0) throw new InvalidDataException("WAV sem chunk 'fmt ' válido.");
+        if (dataBytes < 0) throw new InvalidDataException("WAV sem chunk 'data'.");
+        bool isFloat = format == FormatFloat;
+        if (format != FormatPcm && !isFloat)
+            throw new NotSupportedException($"Formato WAV não suportado (tag {format}). Use PCM ou float.");
+        int frameBytes = Math.Max((int)blockAlign, bits / 8 * channels);
+        long frames = frameBytes > 0 ? dataBytes / frameBytes : 0;
+        return new WavInfo(rate, channels, bits, isFloat, frames);
     }
 
     public static void WriteMono(string path, ReadOnlySpan<float> samples, int sampleRate, WavSampleFormat format = WavSampleFormat.Float32)

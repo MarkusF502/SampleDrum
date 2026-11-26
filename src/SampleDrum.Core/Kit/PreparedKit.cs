@@ -62,6 +62,13 @@ public sealed class PreparedKit
         return new PreparedKit(name ?? Name, SampleRate, copy);
     }
 
+    /// <summary>
+    /// Copy keeping only the samples (per-piece gain/detection cleared). Used for single-piece changes, so
+    /// re-applying the kit never reverts gains or settings the operator changed after the preset was applied.
+    /// </summary>
+    public PreparedKit SamplesOnly() =>
+        new(Name, SampleRate, _pieces.Select(p => p with { GainDb = null, Detection = null }));
+
     /// <summary>A kit without samples.</summary>
     public static PreparedKit Empty(int sampleRate, string name = "") =>
         new(name, sampleRate, DrumPieces.All.Select(PreparedPiece.Empty));

@@ -1,7 +1,8 @@
 namespace SampleDrum.Core;
 
 /// <summary>
-/// Onset detector + sample player. One instance per trigger channel; identical code path live and offline.
+/// Onset detector + sample player for ONE channel (v1). One instance per trigger channel; identical code path live
+/// and offline. The multi-piece engine is <see cref="Kit.KitEngine"/>, built on the same <see cref="TriggerPipeline"/>.
 /// <para>
 /// Thread model: <see cref="Process"/> runs on the audio thread and never allocates, locks, logs, blocks
 /// or does I/O. <see cref="SetSample"/>, <see cref="UpdateSettings"/>, <see cref="RequestTest"/> and
@@ -19,22 +20,13 @@ public sealed class TriggerEngine : IBlockProcessor
     /// <summary>Capacity of the event ring buffer (power of two).</summary>
     public const int EventCapacity = 1024;
 
-    private readonly OnsetDetector _detector;
-    private readonly VoicePool _voices = new();
-    private readonly TriggerEvent[] _events = new TriggerEvent[EventCapacity];
+    private readonly TriggerPipeline _pipeline;
+    private readonly EventRing<TriggerEvent> _events = new(EventCapacity);
+    private readonly RingSink _sink;
 
-    private EngineParams _params;                 // audio thread only
     private EngineParams? _pendingParams;         // written by UpdateSettings, taken by Process
     private volatile float[]? _sample;
     private volatile bool _enabled = true;
-    private bool _wasEnabled = true;              // audio thread only
-
-    private int _testRequested;                   // 0/1
-    private int _testGainBits;
-    private int _inputPeakBits;                   // float bits of max |x| since last read
-    private long _eventWrite;                     // producer: audio thread
-    private long _eventRead;                      // consumer: UI thread
-    private long _droppedEvents;
     private long _position;                       // absolute input sample index of the next block
 
     public TriggerEngine(int sampleRate, TriggerSettings settings)
@@ -42,9 +34,10 @@ public sealed class TriggerEngine : IBlockProcessor
         if (sampleRate <= 0) throw new ArgumentOutOfRangeException(nameof(sampleRate));
         ArgumentNullException.ThrowIfNull(settings);
         SampleRate = sampleRate;
-        _params = new EngineParams(sampleRate, settings);
-        Settings = _params.Settings;
-        _detector = new OnsetDetector(_params);
+        var p = new EngineParams(sampleRate, settings);
+        Settings = p.Settings;
+        _pipeline = new TriggerPipeline(p);
+        _sink = new RingSink(_events);
     }
 
     public int SampleRate { get; }
@@ -63,10 +56,10 @@ public sealed class TriggerEngine : IBlockProcessor
     public long SamplesProcessed => Interlocked.Read(ref _position);
 
     /// <summary>Events lost because the consumer did not drain the ring buffer in time.</summary>
-    public long DroppedEvents => Interlocked.Read(ref _droppedEvents);
+    public long DroppedEvents => _events.Dropped;
 
     /// <summary>Voices currently sounding (diagnostics; read on the audio thread or when idle).</summary>
-    public int ActiveVoiceCount => _voices.ActiveCount;
+    public int ActiveVoiceCount => _pipeline.ActiveVoiceCount;
 
     /// <summary>Currently loaded sample (may be null).</summary>
     public float[]? Sample => _sample;
@@ -74,67 +67,15 @@ public sealed class TriggerEngine : IBlockProcessor
     public void Process(ReadOnlySpan<float> input, Span<float> output)
     {
         var pending = Interlocked.Exchange(ref _pendingParams, null);
-        if (pending != null)
-        {
-            _params = pending;
-            _detector.SetParams(pending);
-        }
-        var p = _params;
-        var sample = _sample;
-        bool enabled = _enabled;
+        if (pending != null) _pipeline.SetParams(pending);
 
-        if (!enabled && _wasEnabled) _voices.FadeOutAutomatic(p.StealFadeSamples);
-        _wasEnabled = enabled;
-
-        int n = input.Length;
-        int outLen = Math.Min(n, output.Length);
         long blockStart = _position;
-
-        if (Interlocked.Exchange(ref _testRequested, 0) != 0)
-        {
-            float g = BitConverter.Int32BitsToSingle(Volatile.Read(ref _testGainBits));
-            if (!float.IsFinite(g) || g < 0f) g = 0f;
-            float gain = g * p.OutputGainLin;
-            if (sample != null) _voices.Start(sample, gain, isTest: true, p.MaxVoices, p.StealFadeSamples);
-            Enqueue(new TriggerEvent(blockStart, 0f, g, true) { PlaybackSampleIndex = blockStart, Gain = gain });
-        }
-
-        float peak = 0f;
-        int segStart = 0;
-        for (int i = 0; i < n; i++)
-        {
-            float x = input[i];
-            float a = x < 0f ? -x : x;
-            if (a > peak) peak = a;
-
-            if (_detector.Step(x, blockStart + i, out var onset) && enabled)
-            {
-                int at = Math.Min(i, outLen);
-                _voices.Render(output.Slice(segStart, at - segStart));
-                segStart = at;
-
-                float gain = p.GainFromVelocity(onset.Velocity);
-                if (sample != null) _voices.Start(sample, gain, isTest: false, p.MaxVoices, p.StealFadeSamples);
-                Enqueue(new TriggerEvent(onset.OnsetIndex, onset.Peak, onset.Velocity, false)
-                {
-                    PlaybackSampleIndex = onset.FireIndex,
-                    Gain = gain,
-                    IsRetrigger = onset.IsRetrigger,
-                });
-            }
-        }
-        _voices.Render(output.Slice(segStart, outLen - segStart));
-
-        Volatile.Write(ref _position, blockStart + n);
-        UpdatePeak(peak);
+        _pipeline.ProcessBlock(input, output, blockStart, _sample, _enabled, _sink);
+        Volatile.Write(ref _position, blockStart + input.Length);
     }
 
     /// <summary>Thread-safe; plays the sample at the start of the next block even when disabled.</summary>
-    public void RequestTest(float gain = 1f)
-    {
-        Volatile.Write(ref _testGainBits, BitConverter.SingleToInt32Bits(gain));
-        Volatile.Write(ref _testRequested, 1);
-    }
+    public void RequestTest(float gain = 1f) => _pipeline.RequestTest(gain);
 
     /// <summary>
     /// Called off the audio thread; atomic reference swap. Samples must already be mono at
@@ -162,12 +103,8 @@ public sealed class TriggerEngine : IBlockProcessor
     public void Reset()
     {
         var pending = Interlocked.Exchange(ref _pendingParams, null);
-        if (pending != null) { _params = pending; _detector.SetParams(pending); }
-        _detector.Reset();
-        _voices.Clear();
-        Volatile.Write(ref _testRequested, 0);
-        Interlocked.Exchange(ref _inputPeakBits, 0);
-        _wasEnabled = _enabled;
+        if (pending != null) _pipeline.SetParams(pending);
+        _pipeline.Reset(_enabled);
     }
 
     /// <summary>Off the audio thread; coefficients are computed here and swapped in at the next block start.</summary>
@@ -180,41 +117,13 @@ public sealed class TriggerEngine : IBlockProcessor
     }
 
     /// <summary>UI/logging thread (single consumer). Lock-free SPSC ring buffer.</summary>
-    public bool TryDequeueEvent(out TriggerEvent e)
-    {
-        long r = _eventRead;
-        if (r == Volatile.Read(ref _eventWrite)) { e = default; return false; }
-        e = _events[r & (EventCapacity - 1)];
-        Volatile.Write(ref _eventRead, r + 1);
-        return true;
-    }
+    public bool TryDequeueEvent(out TriggerEvent e) => _events.TryDequeue(out e);
 
     /// <summary>UI meter polling: linear peak |x| of the input since the previous call.</summary>
-    public float ReadAndResetInputPeak()
-        => BitConverter.Int32BitsToSingle(Interlocked.Exchange(ref _inputPeakBits, 0));
+    public float ReadAndResetInputPeak() => _pipeline.ReadAndResetInputPeak();
 
-    private void Enqueue(in TriggerEvent e)
+    private sealed class RingSink(EventRing<TriggerEvent> ring) : TriggerEventSink
     {
-        long w = _eventWrite;
-        if (w - Volatile.Read(ref _eventRead) >= EventCapacity)
-        {
-            Interlocked.Increment(ref _droppedEvents);
-            return;
-        }
-        _events[w & (EventCapacity - 1)] = e;
-        Volatile.Write(ref _eventWrite, w + 1);
-    }
-
-    private void UpdatePeak(float peak)
-    {
-        // Non-negative floats order like their int bit patterns, so an int max works.
-        int bits = BitConverter.SingleToInt32Bits(peak);
-        int cur = Volatile.Read(ref _inputPeakBits);
-        while (bits > cur)
-        {
-            int prev = Interlocked.CompareExchange(ref _inputPeakBits, bits, cur);
-            if (prev == cur) break;
-            cur = prev;
-        }
+        public override void Emit(in TriggerEvent e) => ring.Enqueue(e);
     }
 }

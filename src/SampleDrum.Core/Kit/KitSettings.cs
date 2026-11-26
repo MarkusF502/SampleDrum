@@ -54,15 +54,59 @@ public sealed class KitSettings : IEquatable<KitSettings>
 }
 
 /// <summary>
-/// Per-piece detection starting points (to be calibrated with real recordings; see docs/README-dev.md).
+/// Per-piece detection starting points, derived from the rules in docs/research/lsp-trigger.md (envelope release
+/// longer than one period of the fundamental, threshold at least ~10 dB above the bleed, high-pass below the
+/// piece's fundamental). They must be calibrated with real recordings (see docs/README-dev.md).
 /// </summary>
 public static class KitDefaults
 {
-    /// <summary>Detection defaults of a piece. Kick = v1 defaults.</summary>
+    /// <summary>
+    /// Snare: fundamental ~180-250 Hz (period 4-5.5 ms) with a sharp attack; the snare mic picks up a lot of kick
+    /// and hi-hat, so the high-pass is 100 Hz (removes most kick bleed) and the threshold is higher than the kick's.
+    /// Rolls, drags and flams are fast, so a shorter lockout (25 ms) and a 10 ms envelope release (2 periods);
+    /// ghost notes need a wider velocity range (30 dB).
+    /// </summary>
+    public static TriggerSettings Snare { get; } = TriggerSettings.Default.WithThreshold(-20f) with
+    {
+        HighPassHz = 100f,
+        EnvelopeReleaseMs = 10f,
+        RearmTimeMs = 10f,
+        MinIntervalMs = 25f,
+        VelocityRangeDb = 30f,
+    };
+
+    /// <summary>
+    /// Rack tom: fundamental ~100-150 Hz (period 7-10 ms). Toms are played rarely and their mics hear the whole kit,
+    /// so the threshold is high (-20 dBFS); 60 Hz high-pass against kick rumble, 15 ms envelope release,
+    /// 30 ms lockout for 16th-note fills.
+    /// </summary>
+    public static TriggerSettings Tom { get; } = TriggerSettings.Default.WithThreshold(-20f) with
+    {
+        HighPassHz = 60f,
+        EnvelopeReleaseMs = 15f,
+        RearmTimeMs = 15f,
+        MinIntervalMs = 30f,
+    };
+
+    /// <summary>
+    /// Floor tom (surdo): fundamental ~70-100 Hz (period 10-14 ms), close to the kick: 50 Hz high-pass, 20 ms
+    /// envelope release (as the kick), threshold -22 dBFS (bleed between kick and floor tom is strong), 30 ms lockout.
+    /// </summary>
+    public static TriggerSettings FloorTom { get; } = TriggerSettings.Default.WithThreshold(-22f) with
+    {
+        HighPassHz = 50f,
+        EnvelopeReleaseMs = 20f,
+        RearmTimeMs = 15f,
+        MinIntervalMs = 30f,
+    };
+
+    /// <summary>Detection defaults of a piece. Kick = v1 defaults (<see cref="TriggerSettings.Default"/>).</summary>
     public static TriggerSettings TriggerFor(DrumPiece p) => p switch
     {
         DrumPiece.Kick => TriggerSettings.Default,
-        // STEP 0 placeholder: tuned per piece in the implementation step.
-        _ => TriggerSettings.Default,
+        DrumPiece.Snare => Snare,
+        DrumPiece.Tom => Tom,
+        DrumPiece.FloorTom => FloorTom,
+        _ => throw new ArgumentOutOfRangeException(nameof(p), p, null),
     };
 }
