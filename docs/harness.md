@@ -183,7 +183,7 @@ Pacote `NAudio.WinMM` **3.3.0** (MIT), conferido no XML do pacote e no código-f
 | `--harness ... --block abc` | mensagem de erro em português, código 2 |
 | `SampleDrum.Offline --kit <pasta> --block 480 --seed 7` | OK, código 0 |
 | `dotnet publish ... -r win-x64 --self-contained` + exe publicado: `--harness --realtime`, `--selftest`, `--list-drivers` | OK, OK, "nenhum driver ASIO instalado" |
-| exe publicado com `--simulation` | abre e fecha sem erro (ainda é a janela v1, ver abaixo) |
+| exe publicado com `--simulation` | abre e fecha sem erro (a janela ainda não usa a opção, ver abaixo) |
 
 Resumo por peça do cenário sintético (semente 1, bloco 256; igual no offline e no tempo real):
 
@@ -217,5 +217,7 @@ essa garantia: remove as detecções da caixa, inventa um disparo do tom e manda
   processados no tempo certo em média, mas em rajadas do tamanho da resolução do timer do Windows. Serve para ouvir e
   exercitar a interface; não é uma medida de latência.
 * O motor v2 não tem "gate" entre canais: vazamento acima do limiar de uma peça dispara essa peça (ver nota do surdo).
-* `--simulation` só liga a opção; a janela atual ainda é a v1 (só bumbo). A janela v2 de 4 peças (do worker
-  multicanal) é quem usa `StartupOptions` para abrir já no perfil Simulação com o kit sintético.
+* `--simulation` só liga a opção: a janela v2 de 4 peças ainda não lê `StartupOptions`, e a "Simulação (sem ASIO)"
+  da janela ainda usa o construtor de compatibilidade v1 do `FakeAudioHost` (só o bumbo é simulado). Falta trocar
+  para `new FakeAudioHost(kit, roteamento, opções)` na janela (arquivo do worker multicanal). O harness pela linha de
+  comando (`--harness`, `--selftest`) já usa as 4 peças.
