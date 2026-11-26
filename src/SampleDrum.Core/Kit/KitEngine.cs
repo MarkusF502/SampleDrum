@@ -111,9 +111,13 @@ public sealed class KitEngine : IMultiChannelProcessor
                 var piece = kit[p];
                 int i = (int)p;
                 var s = _settings[i];
-                if (piece.Detection is { } det) s = s with { Trigger = det.ApplyTo(KitDefaults.TriggerFor(p)) };
+                // Preset detection fields go on top of the CURRENT settings: calibration the preset does not mention
+                // is kept (AppConfig.ApplyPreset uses the same rule).
+                if (piece.Detection is { } det) s = s with { Trigger = det.ApplyTo(s.Trigger) };
                 if (piece.GainDb is { } g) s = s with { OutputGainDb = g };
                 _settings[i] = s;
+                // Params for EVERY piece, from the accumulated settings: if this swap replaces an earlier one the
+                // audio thread has not taken yet, that earlier kit's gains/detection are carried over, not dropped.
                 parms[i] = BuildParams(s);
             }
             Volatile.Write(ref _submittedKit, kit);

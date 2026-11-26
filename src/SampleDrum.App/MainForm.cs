@@ -22,6 +22,11 @@ public sealed class MainForm : Form
     private bool _hostStopFailed;      // last host Dispose threw: its audio thread may still be running
     private KitController _controller; // single path for kit changes (samples, presets, settings, enables)
     private bool _kitWanted;           // last requested kit master state (button toggles this)
+    private bool _syntheticActive;     // the synthetic simulation kit is loaded in the engine (never persisted)
+    private PreparedKit? _operatorKit; // operator's kit saved when the synthetic kit was loaded
+    private readonly bool _savedUseSimulation;     // persisted values a --simulation run must not overwrite
+    private readonly string _savedProfileName;
+    private readonly string? _savedDriverName;
     private Task? _initialLoad;
     private long _eventCount;
     private string _lastLatencyText = "";
@@ -62,6 +67,9 @@ public sealed class MainForm : Form
         Size = new Size(1060, 980);
 
         _cfg = AppConfig.Load(out var cfgNote);
+        _savedUseSimulation = _cfg.UseSimulation;
+        _savedProfileName = _cfg.ActiveProfileName;
+        _savedDriverName = _cfg.DriverName;
         if (StartupOptions.SimulationMode)
         {
             // --simulation: Simulação profile + simulation host + synthetic kit (no ASIO driver is touched).
@@ -184,7 +192,12 @@ public sealed class MainForm : Form
 
     private void WireEvents()
     {
-        _cmbDriver.SelectedIndexChanged += (_, _) => { UpdateAudioUi(); RefreshRouting(); };
+        _cmbDriver.SelectedIndexChanged += async (_, _) =>
+        {
+            UpdateAudioUi();
+            RefreshRouting();
+            if (!IsSimulationSelected) await LeaveSyntheticAsync("driver ASIO escolhido");
+        };
         _sim.PreviewChanged += (_, _) =>
         {
             if (_host is FakeAudioHost f)
@@ -230,7 +243,8 @@ public sealed class MainForm : Form
             panel.SettingsChanged += (_, s) =>
             {
                 _controller.SetPieceSettings(p, s);
-                _cfg.SetPieceSettings(p, s);
+                // Tweaks of the synthetic simulation kit are never written over the operator's calibration.
+                if (!_syntheticActive) _cfg.SetPieceSettings(p, s);
             };
             panel.PieceEnabledChanged += (_, on) =>
             {
@@ -331,6 +345,7 @@ public sealed class MainForm : Form
     /// </summary>
     private async Task SetPieceSampleAsync(DrumPiece p, string? path)
     {
+        if (!await LeaveSyntheticAsync("troca de sample")) return;
         var r = await _controller.SetPieceSamplePath(p, path).Completion;
         switch (r.Status)
         {
@@ -354,6 +369,7 @@ public sealed class MainForm : Form
     /// <summary>Applies a preset through the controller: ALL samples prepared first; only a complete kit is applied (one swap).</summary>
     private async Task ApplyPresetAsync(KitPreset preset)
     {
+        if (!await LeaveSyntheticAsync("preset escolhido")) return;
         Log($"Preparando o preset \"{preset.Name}\"...");
         var r = await _controller.ApplyPreset(preset).Completion;
         switch (r.Status)
@@ -484,18 +500,52 @@ public sealed class MainForm : Form
         StartupOptions.SimulationSeed = seed;
         var kit = StartupOptions.SimulationKit();
         var settings = StartupOptions.SimulationKitSettings();
+        var operatorKit = _syntheticActive ? _operatorKit : _kit.ActiveKit;
         var r = await _controller.ApplyKit(kit, settings).Completion;
         if (r.Status != KitOperationStatus.Applied)
         {
             Log($"Kit sintético não aplicado ({r.Status}).");
             return;
         }
+        _operatorKit = operatorKit;
+        _syntheticActive = true;
         foreach (var p in DrumPieces.All)
         {
             _panels[(int)p].ShowSettings(settings[p]);
             _panels[(int)p].SetSampleText(SampleText(kit[p]) + " [sintético]");
         }
-        Log($"Kit sintético (semente {seed}) carregado: samples e ajustes de detecção da simulação (não salvos na configuração).");
+        Log($"Kit sintético (semente {seed}) carregado: samples e ajustes de detecção da simulação (não salvos na " +
+            "configuração; o kit do operador volta ao escolher um driver ASIO, um sample ou um preset).");
+    }
+
+    /// <summary>
+    /// Unloads the synthetic kit: the operator's samples (kit saved when the synthetic kit was loaded) and the
+    /// calibration stored in the configuration go back into the engine, through the controller. True when no
+    /// synthetic kit is loaded anymore.
+    /// </summary>
+    private async Task<bool> LeaveSyntheticAsync(string reason)
+    {
+        if (!_syntheticActive) return true;
+        // In a --simulation run the operator's configured samples were never loaded: reload whatever is missing.
+        bool reload = DrumPieces.All.Any(p => _cfg[p].SamplePath is not null && _operatorKit?[p].Samples is null);
+        var kit = (_operatorKit ?? PreparedKit.Empty(EngineRate)).SamplesOnly();
+        var settings = _cfg.ToKitSettings();
+        var r = await _controller.ApplyKit(kit, settings).Completion;
+        if (r.Status != KitOperationStatus.Applied)
+        {
+            Log($"ERRO: não foi possível restaurar o kit do operador ({r.Status}); o kit sintético continua carregado.");
+            return false;
+        }
+        _syntheticActive = false;
+        _operatorKit = null;
+        foreach (var p in DrumPieces.All)
+        {
+            _panels[(int)p].ShowSettings(settings[p]);
+            _panels[(int)p].SetSampleText(SampleText(_kit.ActiveKit![p]));
+        }
+        Log($"Kit sintético descarregado ({reason}): samples e ajustes do operador restaurados.");
+        if (reload) await LoadConfiguredSamplesAsync();
+        return true;
     }
 
     // ---------- audio ----------
@@ -508,8 +558,22 @@ public sealed class MainForm : Form
         {
             if (_initialLoad is not null) await _initialLoad; // samples ready BEFORE audio starts
 
+            if (!IsSimulationSelected && !await LeaveSyntheticAsync("início do áudio ASIO"))
+            {
+                MessageBox.Show(this, "O kit sintético da simulação ainda está carregado e não foi possível restaurar o kit " +
+                    "do operador. O áudio ASIO não foi iniciado.", "SampleDrum – kit sintético",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
             var v = RoutingValidator.Validate(_cfg.ActiveProfile);
             RefreshRouting();
+            if (!v.HasErrors && v.RunnablePieces.Count == 0)
+            {
+                const string none = "Nenhuma peça tem entrada e saída definidas (sem erros) neste perfil: nada para iniciar.";
+                Log("ERRO: " + none);
+                MessageBox.Show(this, none, "SampleDrum – roteamento", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
             if (v.HasErrors)
             {
                 string errors = string.Join("\r\n", v.Issues.Where(i => i.IsError).Select(i => "• " + i.Message));
@@ -743,10 +807,26 @@ public sealed class MainForm : Form
 
     private void SaveConfig()
     {
-        _cfg.UseSimulation = IsSimulationSelected;
-        if (!IsSimulationSelected) _cfg.DriverName = (string)_cmbDriver.SelectedItem!;
         foreach (var panel in _panels) _cfg[panel.Piece].AdvancedExpanded = panel.AdvancedExpanded;
-        try { _cfg.Save(); }
+        try
+        {
+            if (StartupOptions.SimulationMode)
+            {
+                // A --simulation run never changes what the operator chose for normal runs: save a detached copy with
+                // the persisted driver/profile/simulation flag (the live config is never mutated for this).
+                var copy = AppConfig.Parse(_cfg.ToJson(), out _);
+                copy.UseSimulation = _savedUseSimulation;
+                copy.ActiveProfileName = _savedProfileName;
+                copy.DriverName = _savedDriverName;
+                copy.Save();
+            }
+            else
+            {
+                _cfg.UseSimulation = IsSimulationSelected;
+                if (!IsSimulationSelected) _cfg.DriverName = (string)_cmbDriver.SelectedItem!;
+                _cfg.Save();
+            }
+        }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             Log($"AVISO: não foi possível salvar {AppConfig.DefaultFilePath}: {ex.Message}");

@@ -170,7 +170,10 @@ public sealed class AppConfig
             if (pp?.GainDb is { } g) c.OutputGainDb = MathF.Abs(g) < 1e-4f ? null : g;
             if (pp?.Detection is { } d)
             {
-                var diff = TriggerOverrides.Diff(d.ApplyTo(KitDefaults.TriggerFor(p)), KitDefaults.TriggerFor(p).Normalized());
+                // Same rule as KitEngine.ApplyKit: the preset's fields go on top of the CURRENT settings (calibration
+                // the preset does not mention is kept).
+                var merged = d.ApplyTo(GetPieceSettings(p).Trigger);
+                var diff = TriggerOverrides.Diff(merged, KitDefaults.TriggerFor(p).Normalized());
                 c.Trigger = diff.IsEmpty ? null : diff;
             }
         }
@@ -296,8 +299,11 @@ public sealed class AppConfig
     {
         using var doc = JsonDocument.Parse(json);
         if (doc.RootElement.ValueKind != JsonValueKind.Object) throw new JsonException("A configuração não é um objeto JSON.");
-        return !doc.RootElement.TryGetProperty(nameof(SettingsVersion), out var v)
-               || v.ValueKind != JsonValueKind.Number || v.GetInt32() < CurrentVersion;
+        if (!doc.RootElement.TryGetProperty(nameof(SettingsVersion), out var v) || v.ValueKind != JsonValueKind.Number)
+            return true;
+        // 2.5, 1e20...: not a valid version -> corrupt file (defaults + message), never an unhandled exception.
+        if (!v.TryGetInt32(out int version)) throw new JsonException($"SettingsVersion inválido: {v.GetRawText()}.");
+        return version < CurrentVersion;
     }
 
     /// <summary>

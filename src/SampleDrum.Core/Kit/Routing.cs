@@ -100,8 +100,17 @@ public enum RoutingIssueKind
 /// <summary>One routing problem; <see cref="Message"/> is pt-BR.</summary>
 public sealed record RoutingIssue(RoutingIssueKind Kind, DrumPiece? Piece, ChannelDirection? Direction, int? DeskChannel, string Message)
 {
-    /// <summary>Errors block the affected piece; <see cref="RoutingIssueKind.Pending"/> only skips it.</summary>
-    public bool IsError => Kind != RoutingIssueKind.Pending;
+    /// <summary>
+    /// The problem is on a piece whose route is incomplete (pending): that piece never runs, so the problem is only a
+    /// warning on it and never blocks the pieces that do run.
+    /// </summary>
+    public bool OnPendingPiece { get; init; }
+
+    /// <summary>
+    /// Errors block start (they always involve a piece with a complete route); <see cref="RoutingIssueKind.Pending"/>
+    /// and problems on pending pieces (<see cref="OnPendingPiece"/>) are warnings.
+    /// </summary>
+    public bool IsError => Kind != RoutingIssueKind.Pending && !OnPendingPiece;
 }
 
 /// <summary>Result of <see cref="RoutingValidator.Validate"/>.</summary>
@@ -225,6 +234,15 @@ public static class RoutingValidator
         int limit = Math.Min(Math.Max(count, 0), ChannelMap.MaxChannels);
         var byChannel = new Dictionary<int, List<DrumPiece>>();
 
+        // Problems on a pending piece (incomplete route) are warnings on that piece only: it never runs.
+        void Add(RoutingIssueKind kind, DrumPiece p, int c, string message)
+        {
+            bool pending = profile[p].IsPending;
+            issues.Add(new RoutingIssue(kind, p, dir, c, pending ? $"{message} (peça pendente: aviso, não impede as outras)" : message)
+                { OnPendingPiece = pending });
+            if (!pending) blocked[(int)p] = true;
+        }
+
         foreach (var p in DrumPieces.All)
         {
             var r = profile[p];
@@ -233,36 +251,34 @@ public static class RoutingValidator
 
             if (c < 1 || c > limit)
             {
-                issues.Add(new RoutingIssue(RoutingIssueKind.OutOfRange, p, dir, c,
-                    $"{p.Label()}: {dirText} USB {c} fora da faixa (o driver tem {dirText}s 1 a {limit})."));
-                blocked[(int)p] = true;
+                Add(RoutingIssueKind.OutOfRange, p, c, $"{p.Label()}: {dirText} USB {c} fora da faixa (o driver tem {dirText}s 1 a {limit}).");
                 continue;
             }
 
             foreach (var res in profile.Reserved)
-            {
                 if (res.Direction == dir && res.DeskChannel == c)
-                {
-                    issues.Add(new RoutingIssue(RoutingIssueKind.Reserved, p, dir, c,
-                        $"{p.Label()}: {dirText} USB {c} é reservada ({res.Label}); escolha outro canal."));
-                    blocked[(int)p] = true;
-                }
-            }
+                    Add(RoutingIssueKind.Reserved, p, c, $"{p.Label()}: {dirText} USB {c} é reservada ({res.Label}); escolha outro canal.");
 
             if (!byChannel.TryGetValue(c, out var list)) byChannel[c] = list = new List<DrumPiece>();
             list.Add(p);
         }
 
+        var kind = dir == ChannelDirection.Input ? RoutingIssueKind.DuplicateInput : RoutingIssueKind.DuplicateOutput;
+        string verb = dir == ChannelDirection.Input ? "leem a mesma entrada" : "escrevem na mesma saída";
         foreach (var (c, pieces) in byChannel)
         {
             if (pieces.Count < 2) continue;
-            var kind = dir == ChannelDirection.Input ? RoutingIssueKind.DuplicateInput : RoutingIssueKind.DuplicateOutput;
-            string names = string.Join(" e ", pieces.Select(x => x.Label()));
-            string verb = dir == ChannelDirection.Input ? "leem a mesma entrada" : "escrevem na mesma saída";
-            foreach (var p in pieces)
+            // Errors only between pieces that would really run (complete routes).
+            var complete = pieces.Where(x => !profile[x].IsPending).ToList();
+            if (complete.Count >= 2)
             {
-                issues.Add(new RoutingIssue(kind, p, dir, c, $"{names} {verb} USB {c}."));
-                blocked[(int)p] = true;
+                string names = string.Join(" e ", complete.Select(x => x.Label()));
+                foreach (var p in complete) Add(kind, p, c, $"{names} {verb} USB {c}.");
+            }
+            foreach (var p in pieces.Where(x => profile[x].IsPending))
+            {
+                string others = string.Join(" e ", pieces.Where(x => x != p).Select(x => x.Label()));
+                Add(kind, p, c, $"{p.Label()} usa a mesma {dirText} USB {c} que {others}; corrija antes de completar a rota.");
             }
         }
     }

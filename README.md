@@ -110,6 +110,10 @@ Detalhes do ASIO/NAudio: [docs/asio-naudio.md](docs/asio-naudio.md).
   sintético**, e a **prévia nos fones** (volume, quais peças entram, microfones por baixo). A fonte e o bloco valem
   no próximo "Iniciar áudio"; a prévia muda na hora. Na simulação só as peças **roteadas no perfil** recebem sinal
   (perfil Simulação = as quatro; perfil Igreja = só o bumbo enquanto os outros estão pendentes).
+  **Carregar kit sintético** troca samples e ajustes por os da simulação **sem salvar** nada na configuração; ao
+  escolher um driver ASIO, iniciar o ASIO, escolher um sample ou aplicar um preset, o kit e a calibração do operador
+  voltam automaticamente. Uma execução com `--simulation` também não altera o driver, o perfil e a opção de
+  simulação salvos para as execuções normais.
 - **Kit**: **Ativar kit / Desativar kit**; preset (**Aplicar preset**, **Abrir arquivo...**,
   **Salvar preset...**); pasta de samples.
 - Uma faixa por peça (**Bumbo, Caixa, Tom, Surdo**): **Ativa**, rota na numeração da mesa ("Entrada USB 3
@@ -165,8 +169,10 @@ serve para validar o roteamento de quatro peças.
 ### Regra das rotas pendentes e validação
 
 - **Pendente** (entrada e/ou saída sem canal) não é erro: aquela peça **não roda no ASIO** e as outras rodam
-  normalmente. A faixa da peça mostra "pendente" e o teste dela não sai na mesa.
-- **Erros** (o áudio ASIO **não inicia** até corrigir; a lista mostra a mensagem):
+  normalmente. A faixa da peça mostra "pendente" e o teste dela não sai na mesa. Se a peça pendente já tem um dos
+  canais preenchido e ele repete o canal de outra peça, é reservado ou está fora da faixa, isso aparece só como
+  **aviso** nela: não impede as peças completas de iniciar.
+- **Erros** (só entre peças com rota completa; o áudio **não inicia** até corrigir; a lista mostra a mensagem):
   - **entrada repetida**: duas peças lendo a mesma entrada USB;
   - **saída repetida**: duas peças escrevendo na mesma saída USB;
   - **canal reservado**: por exemplo entrada USB 1 ou 2 (OBS MixBus 13/14);
@@ -231,6 +237,11 @@ Ainda não confirmado (sem hardware até agora):
   `max(DetectTimeMs, ScanMs)`, 2 ms por padrão; ajustável em **Avançado → Janela de velocidade**).
 - Níveis reais de cada peça e do vazamento entre microfones, e portanto os padrões finais de limiar, velocidade,
   intervalo mínimo e redisparo de cada peça.
+- **Surdo: limiar padrão −16 dBFS é um compromisso.** Ele foi elevado de −22 para que o vazamento forte do bumbo
+  (≈ −21 dBFS no microfone do surdo, no cenário sintético) não dispare o surdo; em troca, golpes **muito suaves** do
+  surdo, cujo pico no caminho de detecção fique abaixo de ≈ −16 dBFS, deixam de disparar. Com a gravação da igreja,
+  meça o vazamento do bumbo e o golpe mais suave do surdo e ponha o limiar entre os dois (mais perto do golpe se o
+  vazamento for baixo).
 - Envios e retornos USB da caixa, do tom e do surdo na mesa (hoje "pendentes").
 
 ## Documentação
