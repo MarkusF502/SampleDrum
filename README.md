@@ -256,3 +256,5 @@ Ainda não confirmado (sem hardware até agora):
 - [docs/asio-naudio.md](docs/asio-naudio.md) — ASIO com NAudio, threads, formatos e índices.
 - [docs/research/lsp-trigger.md](docs/research/lsp-trigger.md) — pesquisa sobre o LSP Trigger (referência
   de comportamento; nenhum código do LSP, que é LGPL-3, foi copiado).
+- [docs/research/painel-movel.md](docs/research/painel-movel.md) — pesquisa e plano do painel de controle pelo
+  celular (próxima entrega; a API do Core para ele já existe, ver "API para o painel" em docs/README-dev.md).
