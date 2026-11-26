@@ -35,14 +35,20 @@ src\SampleDrum.App\bin\Release\net10.0-windows\SampleDrum.App.exe --harness C:\t
 dotnet run --project src\SampleDrum.Offline -c Release -- --kit C:\temp\sd-offline --block 480 --seed 7
 ```
 
-No PowerShell, um programa de janela (WinExe) não segura o prompt: para ver a saída e o código de saída use
-`| Out-Host` ou `Start-Process -Wait`, por exemplo:
+No PowerShell, o `SampleDrum.App.exe` é um programa de janela (WinExe) e o PowerShell não espera por ele: para ver
+a saída e o código de saída, **sempre** termine o comando com um pipe:
 
 ```powershell
 .\SampleDrum.App.exe --harness C:\temp\sd-teste | Out-Host; $LASTEXITCODE
+
+# para guardar a saída num arquivo
+.\SampleDrum.App.exe --selftest | Out-File selftest.txt; Get-Content selftest.txt; $LASTEXITCODE
 ```
 
-(No Prompt de Comando use `start /wait SampleDrum.App.exe --selftest` e `echo %ERRORLEVEL%`.)
+**Não use `> arquivo`** com o `SampleDrum.App.exe` (por exemplo `--selftest > selftest.txt`): o PowerShell não espera
+o programa terminar e o arquivo fica vazio (verificado no Windows PowerShell 5.1). No Prompt de Comando use
+`start /wait SampleDrum.App.exe --selftest` e `echo %ERRORLEVEL%`. O `SampleDrum.Offline` é um programa de console
+comum e não tem esse problema.
 
 ### Gerar uma pasta publicada (não precisa de SDK no PC de destino)
 
@@ -209,8 +215,11 @@ suaves do surdo, ordem dos eventos); as linhas marcadas "25/11" não foram repet
 | Verificação | Resultado |
 |---|---|
 | `dotnet build SampleDrum.sln -c Release` | 0 avisos, 0 erros |
-| `dotnet test SampleDrum.sln -c Release` (2 vezes) | App (Windows): 7/7 nas duas. Core: 252/256 nas duas — os 21 `HarnessTests` passam; falham as 4 sementes de `KitEngineTests.DefaultKit_PassesSyntheticScenario_KickBleedDoesNotFireFloorTom` (arquivo do worker multicanal), que confere todo o gabarito com tolerância fixa de ±2 ms e ainda não usa a tolerância de 8 ms dos golpes do surdo perto do limiar (correção de 1 linha pedida) |
-| `SampleDrum.App.exe --selftest` | 11/11 OK em ~9 s, código 0 |
+| `dotnet test SampleDrum.sln -c Release` (3 vezes, a última depois das correções de mensagens) | 263 testes no total. App (Windows): 7/7. Core: 252/256 — os 21 `HarnessTests` passam; falham as 4 sementes de `KitEngineTests.DefaultKit_PassesSyntheticScenario_KickBleedDoesNotFireFloorTom` (arquivo do worker multicanal), que confere todo o gabarito com tolerância fixa de ±2 ms e ainda não usa a tolerância de 8 ms dos golpes do surdo perto do limiar (correção de 1 linha pedida) |
+| `SampleDrum.App.exe --selftest` | 11/11 OK em ~8–9 s, código 0 |
+| Windows PowerShell 5.1: `--selftest \| Out-File x.txt; Get-Content x.txt; $LASTEXITCODE` e `--harness --help \| Out-Host` | saída completa no arquivo/console, código 0 |
+| `SampleDrum.Offline --mic C:\nao\existe.wav` e `--kit <pasta> --mics a.wav b.wav c.wav d.wav` (arquivos inexistentes) | "Erro: arquivo não encontrado: …" em português; códigos 1 e 2 |
+| `SampleDrum.Offline --generate-synthetic <pasta>` | exemplo impresso com `dotnet run --project src/SampleDrum.Offline -c Release -- …` |
 | `--harness <pasta>` com bloco 64, 128, 256 e 480 | OK nos quatro, código 0 |
 | `--harness <pasta> --realtime` (tempo real 1×) | offline OK e tempo real OK, disparos idênticos ao offline |
 | cenário em 7 sementes (1, 2, 3, 4, 5, 7, 11) × blocos 64/128/256/480, avaliador novo | 28/28 OK (nenhum alarme falso da nova verificação de saída) |

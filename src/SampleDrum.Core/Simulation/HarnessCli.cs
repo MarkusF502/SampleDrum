@@ -49,6 +49,9 @@ public static class HarnessCli
         Saídas: retorno-bumbo/caixa/tom/surdo.wav, retornos-4ch.wav (canal n = saída USB n), previa-estereo.wav,
                 mic-*.wav, mics-4ch.wav, relatorio.csv, relatorio.md (e subpasta tempo-real/ com --realtime/--play).
         Código de saída: 0 = tudo conforme o gabarito; 1 = alguma expectativa falhou; 2 = erro de argumentos/arquivos.
+        No PowerShell o SampleDrum.App.exe é um programa de janela: NÃO use "> arquivo" (o PowerShell não espera e o
+        arquivo fica vazio). Use "| Out-Host; $LASTEXITCODE" ou "| Out-File saida.txt; Get-Content saida.txt;
+        $LASTEXITCODE"; no Prompt de Comando, "start /wait".
         """;
 
     public static HarnessCliOptions Parse(IReadOnlyList<string> args)
@@ -124,7 +127,7 @@ public static class HarnessCli
         catch (Exception ex) when (ex is ArgumentException or FormatException or IOException or InvalidDataException
                                        or NotSupportedException or UnauthorizedAccessException)
         {
-            Log($"Erro: {ex.Message}");
+            Log($"Erro: {(ex is IOException or UnauthorizedAccessException ? UserMessages.FileError(ex) : ex.Message)}");
             Log(Usage(command));
             return 2;
         }

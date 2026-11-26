@@ -34,13 +34,16 @@ public static class Program
         }
         catch (Exception ex) when (ex is IOException or InvalidDataException or NotSupportedException or UnauthorizedAccessException)
         {
-            Console.Error.WriteLine($"Erro: {ex.Message}");
+            Console.Error.WriteLine($"Erro: {SampleDrum.Core.Simulation.UserMessages.FileError(ex)}");
             return 1;
         }
     }
 
     private static int Run(Options o)
     {
+        // Name the missing file in the (pt-BR) error, also when its folder does not exist.
+        foreach (var f in new[] { o.Mic, o.Sample })
+            if (f != null && !File.Exists(f)) throw new FileNotFoundException(null, Path.GetFullPath(f));
         var mic = WavFile.ReadMonoAtRate(o.Mic!, EngineRate, o.Channel - 1, out var micNote);
         if (micNote != null) Console.WriteLine($"Aviso: {micNote}");
 
@@ -188,7 +191,7 @@ public static class Program
         Console.WriteLine($"Gerado: {csvPath}");
         Console.WriteLine();
         Console.WriteLine("Exemplo:");
-        Console.WriteLine($"  dotnet run --project src/SampleDrum.Offline -- --mic {micPath} --sample {kickPath} --out {Path.Combine(dir, "triggers.wav")} --expected {csvPath}");
+        Console.WriteLine($"  dotnet run --project src/SampleDrum.Offline -c Release -- --mic {micPath} --sample {kickPath} --out {Path.Combine(dir, "triggers.wav")} --expected {csvPath}");
         return 0;
     }
 

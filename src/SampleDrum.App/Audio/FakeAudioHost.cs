@@ -236,7 +236,8 @@ public sealed class FakeAudioHost : IAudioHost
         catch (Exception ex) when (ex is IOException or InvalidDataException or NotSupportedException
                                        or UnauthorizedAccessException or ArgumentException)
         {
-            throw new AudioHostException($"Não foi possível ler o microfone de {p.Label()} ({path}): {ex.Message}", ex);
+            string why = ex is IOException or UnauthorizedAccessException ? UserMessages.FileError(ex, path) : ex.Message;
+            throw new AudioHostException($"Não foi possível ler o microfone de {p.Label()} ({path}): {why}", ex);
         }
     }
 
