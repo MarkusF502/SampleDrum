@@ -1,5 +1,6 @@
 using System.Text;
 using SampleDrum.App.Audio;
+using SampleDrum.App.Harness;
 using SampleDrum.Core;
 using SampleDrum.Core.Kit;
 
@@ -16,6 +17,7 @@ public sealed class MainForm : Form
     private readonly AppConfig _cfg;
     private readonly KitEngine _kit;
     private readonly PiecePanel[] _panels = new PiecePanel[DrumPieces.Count];
+    private readonly SimulationPanel _sim = new();
     private IAudioHost? _host;
     private bool _hostStopFailed;      // last host Dispose threw: its audio thread may still be running
     private bool _kitBusy;             // a sample/preset is being prepared off the UI thread
@@ -59,6 +61,12 @@ public sealed class MainForm : Form
         Size = new Size(1060, 980);
 
         _cfg = AppConfig.Load(out var cfgNote);
+        if (StartupOptions.SimulationMode)
+        {
+            // --simulation: Simulação profile + simulation host + synthetic kit (no ASIO driver is touched).
+            _cfg.UseSimulation = true;
+            _cfg.ActiveProfileName = RoutingProfiles.SimulationName;
+        }
         _kit = new KitEngine(EngineRate, _cfg.ToKitSettings()) { KitEnabled = false }; // always start DISABLED
         foreach (var p in DrumPieces.All) _kit.SetPieceEnabled(p, _cfg[p].Enabled);
         _kit.ApplyKit(PreparedKit.Empty(EngineRate));
@@ -72,7 +80,15 @@ public sealed class MainForm : Form
         Log("SampleDrum iniciado. O kit começa DESATIVADO.");
         Log($"Configurações: {AppConfig.DefaultFilePath}");
         if (cfgNote is not null) Log(cfgNote);
-        _initialLoad = LoadConfiguredSamplesAsync();
+        if (StartupOptions.SimulationMode)
+        {
+            Log("Modo --simulation: perfil \"Simulação\", host de simulação e kit sintético.");
+            LoadSyntheticKit(StartupOptions.SimulationSeed);
+        }
+        else
+        {
+            _initialLoad = LoadConfiguredSamplesAsync();
+        }
         _uiTimer.Start();
     }
 
@@ -105,6 +121,7 @@ public sealed class MainForm : Form
             _lstIssues,
             PiecePanel.Row(_btnStart, _btnStop, _lblAudio),
             PiecePanel.Row(_lblLatency)));
+        content.Controls.Add(_sim);
         content.Controls.Add(Group("Kit",
             PiecePanel.Row(_btnKit, _lblKit),
             PiecePanel.Row(PiecePanel.Lbl("Preset:"), _cmbPresets, _btnLoadPreset, _btnPresetFile, _btnSavePreset),
@@ -166,6 +183,15 @@ public sealed class MainForm : Form
     private void WireEvents()
     {
         _cmbDriver.SelectedIndexChanged += (_, _) => { UpdateAudioUi(); RefreshRouting(); };
+        _sim.PreviewChanged += (_, _) =>
+        {
+            if (_host is FakeAudioHost f)
+            {
+                f.Preview = _sim.Preview;
+                f.PreviewEnabled = _sim.PreviewEnabled;
+            }
+        };
+        _sim.SyntheticKitRequested += (_, seed) => LoadSyntheticKit(seed);
         _btnRefresh.Click += (_, _) => PopulateDrivers();
         _btnPanel.Click += (_, _) => OpenAsioPanel();
         _cmbProfile.SelectedIndexChanged += (_, _) =>
@@ -244,8 +270,9 @@ public sealed class MainForm : Form
         if (v.Issues.Count == 0) _lstIssues.Items.Add("Roteamento OK: as quatro peças têm entrada e saída.");
         _lblRouting.Text = v.HasErrors
             ? "há erros: o ASIO não inicia até corrigir"
-            : $"{v.RunnablePieces.Count} de {DrumPieces.Count} peças rodam no ASIO" +
-              (IsSimulationSelected ? " (na simulação as rotas não são usadas)" : "");
+            : IsSimulationSelected
+                ? $"{v.RunnablePieces.Count} de {DrumPieces.Count} peças recebem sinal na simulação (só as roteadas no perfil)"
+                : $"{v.RunnablePieces.Count} de {DrumPieces.Count} peças rodam no ASIO";
         _lblRouting.ForeColor = v.HasErrors ? Color.DarkRed : SystemColors.ControlText;
     }
 
@@ -474,6 +501,25 @@ public sealed class MainForm : Form
         return form.ShowDialog() == DialogResult.OK ? box.Text : null;
     }
 
+    /// <summary>
+    /// Synthetic kit of the simulation scenario: its samples (one ApplyKit) and the per-piece detection that matches
+    /// it, shown in the panels. Not written to the configuration (the operator's own samples/settings stay saved).
+    /// </summary>
+    private void LoadSyntheticKit(int seed)
+    {
+        StartupOptions.SimulationSeed = seed;
+        var kit = StartupOptions.SimulationKit();
+        var settings = StartupOptions.SimulationKitSettings();
+        _kit.ApplyKit(kit);
+        foreach (var p in DrumPieces.All)
+        {
+            _kit.UpdatePieceSettings(p, settings[p]);
+            _panels[(int)p].ShowSettings(settings[p]);
+            _panels[(int)p].SetSampleText(SampleText(kit[p]) + " [sintético]");
+        }
+        Log($"Kit sintético (semente {seed}) carregado: samples e ajustes de detecção da simulação (não salvos na configuração).");
+    }
+
     // ---------- audio ----------
 
     private async Task StartAudioAsync()
@@ -484,28 +530,35 @@ public sealed class MainForm : Form
         {
             if (_initialLoad is not null) await _initialLoad; // samples ready BEFORE audio starts
 
+            var v = RoutingValidator.Validate(_cfg.ActiveProfile);
+            RefreshRouting();
+            if (v.HasErrors)
+            {
+                string errors = string.Join("\r\n", v.Issues.Where(i => i.IsError).Select(i => "• " + i.Message));
+                Log("ERRO: o roteamento tem erros; o áudio não foi iniciado.\r\n" + errors);
+                MessageBox.Show(this, "Corrija o roteamento antes de iniciar:\r\n\r\n" + errors,
+                    "SampleDrum – roteamento inválido", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+            foreach (var issue in v.Issues) Log("Aviso: " + issue.Message);
+            var routing = v.Resolve();
+
             IAudioHost host;
             if (IsSimulationSelected)
             {
-                // TEMPORARY until the harness worker's multi-channel FakeAudioHost lands: the v1 simulation feeds its
-                // synthetic kick into the Bumbo pipeline; the other pieces get silence (their manual tests still play).
-                host = new FakeAudioHost(new KickSimulationAdapter(_kit), EngineRate);
-                Log("Simulação: bumbo sintético no canal do Bumbo (caixa/tom/surdo sem entrada nesta versão da simulação).");
+                var options = _sim.BuildOptions();
+                Log($"Simulação: fonte {options.Source}, bloco {options.BlockSize}, " +
+                    $"{(options.Loop ? "repetindo" : "sem repetir")}, peças com sinal: " +
+                    (routing.RoutedPieces.Count == 0 ? "nenhuma" : string.Join(", ", routing.RoutedPieces.Select(p => p.Label()))) + ".");
+                var fake = new FakeAudioHost(_kit, routing, options);
+                fake.Finished += () => PostToUi(() =>
+                {
+                    if (ReferenceEquals(_host, fake)) StopAudio("Simulação: fim dos arquivos de microfone.");
+                });
+                host = fake;
             }
             else
             {
-                var v = RoutingValidator.Validate(_cfg.ActiveProfile);
-                RefreshRouting();
-                if (v.HasErrors)
-                {
-                    string errors = string.Join("\r\n", v.Issues.Where(i => i.IsError).Select(i => "• " + i.Message));
-                    Log("ERRO: o roteamento tem erros; o áudio não foi iniciado.\r\n" + errors);
-                    MessageBox.Show(this, "Corrija o roteamento antes de iniciar:\r\n\r\n" + errors,
-                        "SampleDrum – roteamento inválido", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    return;
-                }
-                foreach (var issue in v.Issues) Log("Aviso: " + issue.Message);
-                var routing = v.Resolve();
                 string driver = (string)_cmbDriver.SelectedItem!;
                 Log($"Abrindo \"{driver}\" com {routing.RoutedPieces.Count} peça(s): " + string.Join(", ", routing.RoutedPieces.Select(p =>
                     $"{p.Label()} entrada USB {routing.InputIndex(p) + 1} (índice ASIO {routing.InputIndex(p)}) → " +
@@ -531,6 +584,8 @@ public sealed class MainForm : Form
             host.Faulted += msg => PostToUi(() => OnHostFaulted(host, msg));
             host.Start();
             Log("Áudio iniciado: " + host.Description);
+            if (host is FakeAudioHost started)
+                foreach (var note in started.LoadNotes) Log("Simulação: " + note);
             UpdateLatencyLabel();
             Log("Para anotar no ensaio: " + _lblLatency.Text);
             SaveConfig();
@@ -620,6 +675,8 @@ public sealed class MainForm : Form
         _btnStop.Enabled = running;
         _cmbDriver.Enabled = _btnRefresh.Enabled = _cmbProfile.Enabled = !running;
         _btnPanel.Enabled = !IsSimulationSelected;
+        _sim.Visible = IsSimulationSelected;
+        _sim.SetRunning(running);
         if (!running) _lblAudio.Text = "Áudio parado";
     }
 
@@ -652,6 +709,14 @@ public sealed class MainForm : Form
 
         if (_host?.IsRunning == true)
             _lblAudio.Text = $"Rodando: {_host.CallbackCount} blocos de {_host.FramesPerBuffer}, {_eventCount} disparos";
+        if (_host is FakeAudioHost fake && fake.IsRunning)
+        {
+            double pos = fake.PositionSamples / (double)EngineRate, len = fake.SourceLengthSamples / (double)EngineRate;
+            string preview = !fake.PreviewEnabled ? "prévia desligada"
+                : fake.PreviewError is { } err ? $"prévia: ERRO {err}"
+                : $"prévia ligada ({fake.PreviewUnderruns} falhas de buffer)";
+            _sim.SetStatus($"  {pos:0.0} / {len:0.0} s; {preview}", fake.PreviewError is not null);
+        }
         UpdateLatencyLabel();
     }
 
@@ -715,34 +780,5 @@ public sealed class MainForm : Form
         _uiTimer.Stop();
         DisposeHost();
         SaveConfig();
-    }
-
-    /// <summary>
-    /// TEMPORARY bridge for the v1 single-channel <see cref="FakeAudioHost"/>: its mono input drives the Bumbo
-    /// pipeline, the other pieces get silence, and the four returns are summed into its (metered, discarded) output.
-    /// Allocation-free; replaced when the multi-channel simulation host is available.
-    /// </summary>
-    private sealed class KickSimulationAdapter(KitEngine kit) : IBlockProcessor
-    {
-        private const int Max = 8192;
-        private readonly float[][] _in = DrumPieces.All.Select(_ => new float[Max]).ToArray();
-        private readonly float[][] _out = DrumPieces.All.Select(_ => new float[Max]).ToArray();
-
-        public void Process(ReadOnlySpan<float> input, Span<float> output)
-        {
-            for (int off = 0; off < input.Length; off += Max)
-            {
-                int n = Math.Min(Max, input.Length - off);
-                input.Slice(off, n).CopyTo(_in[(int)DrumPiece.Kick]);
-                foreach (var o in _out) o.AsSpan(0, n).Clear();
-                kit.Process(_in, _out, n);
-                var dst = output.Slice(off, Math.Min(n, Math.Max(0, output.Length - off)));
-                for (int p = 0; p < _out.Length; p++)
-                {
-                    var src = _out[p];
-                    for (int i = 0; i < dst.Length; i++) dst[i] += src[i];
-                }
-            }
-        }
     }
 }
