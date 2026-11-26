@@ -1,77 +1,49 @@
 using System.Text;
 using SampleDrum.App.Audio;
 using SampleDrum.Core;
+using SampleDrum.Core.Kit;
 
 namespace SampleDrum.App;
 
 /// <summary>
-/// Main window (pt-BR). All engine/host control happens on the UI thread; the audio thread only runs
-/// <see cref="IBlockProcessor.Process"/>. UI refresh: ~30 Hz timer polling the engine.
+/// Main window (pt-BR) for the four-piece kit. All engine/host control happens on the UI thread; the audio thread only
+/// runs <see cref="IMultiChannelProcessor.Process"/>. UI refresh and logging: ~30 Hz timer on the UI thread.
 /// </summary>
 public sealed class MainForm : Form
 {
     private const int EngineRate = AsioDuplexHost.RequiredSampleRate;
 
-    private readonly AppSettings _settings;
-    private readonly TriggerEngine _engine;
+    private readonly AppConfig _cfg;
+    private readonly KitEngine _kit;
+    private readonly PiecePanel[] _panels = new PiecePanel[DrumPieces.Count];
     private IAudioHost? _host;
-    private Task? _sampleLoad;
-    private bool _sampleLoaded;
+    private bool _hostStopFailed;      // last host Dispose threw: its audio thread may still be running
+    private bool _kitBusy;             // a sample/preset is being prepared off the UI thread
+    private Task? _initialLoad;
     private long _eventCount;
-    private DateTime _ledUntil = DateTime.MinValue;
-    private bool _ledManual;
-    private float _meterDb = LevelMeter.MinDb, _holdDb = LevelMeter.MinDb;
-    private DateTime _holdUntil = DateTime.MinValue;
+    private string _lastLatencyText = "";
 
     private readonly ComboBox _cmbDriver = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 300 };
     private readonly Button _btnPanel = new() { Text = "Painel ASIO", AutoSize = true };
     private readonly Button _btnRefresh = new() { Text = "Atualizar lista", AutoSize = true };
-    private readonly NumericUpDown _nudIn = new() { Minimum = 1, Maximum = ChannelMap.MaxChannels, Width = 50 };
-    private readonly NumericUpDown _nudOut = new() { Minimum = 1, Maximum = ChannelMap.MaxChannels, Width = 50 };
-    private readonly Label _lblInIdx = Lbl("");
-    private readonly Label _lblOutIdx = Lbl("");
+    private readonly ComboBox _cmbProfile = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 160 };
+    private readonly Button _btnEditRoutes = new() { Text = "Editar rotas...", AutoSize = true };
+    private readonly Label _lblRouting = PiecePanel.Lbl("");
+    private readonly ListBox _lstIssues = new() { Width = 860, Height = 64, IntegralHeight = false };
     private readonly Button _btnStart = new() { Text = "Iniciar áudio", AutoSize = true };
     private readonly Button _btnStop = new() { Text = "Parar áudio", AutoSize = true, Enabled = false };
-    private readonly Label _lblAudio = Lbl("Áudio parado");
-    private readonly Button _btnWav = new() { Text = "Escolher WAV...", AutoSize = true };
-    private readonly Label _lblWav = Lbl("Nenhum sample carregado");
-    private readonly Button _btnTest = new() { Text = "Testar sample", AutoSize = true };
-    private readonly Button _btnEnable = new() { Text = "Ativar disparo", AutoSize = true };
-    private readonly Label _lblEnabled = Lbl("");
-    private readonly LevelMeter _meter = new() { Width = 420 };
-    private readonly Panel _led = new() { Width = 22, Height = 22, BackColor = Color.FromArgb(0, 60, 0), Margin = new Padding(8, 3, 3, 3) };
-    private readonly Label _lblLevel = Lbl("-∞ dBFS");
-    private readonly NumericUpDown _nudThreshold = DbBox(-90, 0);
-    private readonly NumericUpDown _nudRearm = DbBox(-120, 0);
-    private readonly NumericUpDown _nudInterval = new() { Minimum = 0, Maximum = 5000, Increment = 5, Width = 70 };
-    private readonly Label _lblLatency = Lbl("Buffer/latência: áudio parado");
+    private readonly Label _lblAudio = PiecePanel.Lbl("Áudio parado");
+    private readonly Label _lblLatency = PiecePanel.Lbl("Buffer/latência: áudio parado");
 
-    // "Avançado" (calibration at the rehearsal), collapsible.
-    private readonly CheckBox _chkAdvanced = new()
-    {
-        Text = "Avançado ▸", Appearance = Appearance.Button, AutoSize = true, Margin = new Padding(3, 6, 3, 3),
-    };
-    private readonly FlowLayoutPanel _pnlAdvanced = new()
-    {
-        FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, Visible = false,
-        Margin = new Padding(0),
-    };
-    private readonly NumericUpDown _nudHighPass = Box(0, 2000, 0, 5m);
-    private readonly NumericUpDown _nudDetect = Box(0, 20, 1, 0.1m);
-    private readonly NumericUpDown _nudScan = Box(0, 50, 1, 0.5m);
-    private readonly Label _lblTriggerDelay = Lbl("");
-    private readonly NumericUpDown _nudRearmTime = Box(0, 1000, 0, 1m);
-    private readonly NumericUpDown _nudRetrigger = Box(0, 48, 1, 0.5m);
-    private readonly NumericUpDown _nudVelRange = Box(1, 120, 1, 1m);
-    private readonly NumericUpDown _nudMinGain = Box(-96, 0, 1, 1m);
-    private readonly CheckBox _chkFixedVelocity = new()
-    {
-        Text = "Velocidade fixa (todo disparo a 0 dB)", AutoSize = true, Margin = new Padding(3, 6, 3, 0),
-    };
-    private readonly Button _btnDefaults = new() { Text = "Restaurar padrões", AutoSize = true };
-    private bool _loadingUi;
-    private bool _hostStopFailed; // last host Dispose threw: its audio thread may still be running
-    private string _lastLatencyText = "";
+    private readonly Button _btnKit = new() { Text = "Ativar kit", AutoSize = true, Font = new Font(SystemFonts.DefaultFont.FontFamily, 11f, FontStyle.Bold) };
+    private readonly Label _lblKit = PiecePanel.Lbl("");
+    private readonly ComboBox _cmbPresets = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 220 };
+    private readonly Button _btnLoadPreset = new() { Text = "Aplicar preset", AutoSize = true };
+    private readonly Button _btnSavePreset = new() { Text = "Salvar preset...", AutoSize = true };
+    private readonly Button _btnPresetFile = new() { Text = "Abrir arquivo...", AutoSize = true };
+    private readonly Label _lblSamples = PiecePanel.Lbl("");
+    private readonly Button _btnSamplesFolder = new() { Text = "Pasta de samples...", AutoSize = true };
+
     private readonly TextBox _txtLog = new()
     {
         Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill,
@@ -81,155 +53,97 @@ public sealed class MainForm : Form
 
     public MainForm()
     {
-        Text = "SampleDrum – reforço de bumbo";
+        Text = "SampleDrum – reforço de bateria (bumbo, caixa, tom, surdo)";
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(820, 640);
-        Size = new Size(880, 860);
+        MinimumSize = new Size(960, 700);
+        Size = new Size(1060, 980);
 
-        _settings = AppSettings.Load(out var settingsNote);
-        _engine = new TriggerEngine(EngineRate, _settings.ToTriggerSettings()); // Core defaults + stored overrides
-        _engine.Enabled = false; // always start DISABLED
+        _cfg = AppConfig.Load(out var cfgNote);
+        _kit = new KitEngine(EngineRate, _cfg.ToKitSettings()) { KitEnabled = false }; // always start DISABLED
+        foreach (var p in DrumPieces.All) _kit.SetPieceEnabled(p, _cfg[p].Enabled);
+        _kit.ApplyKit(PreparedKit.Empty(EngineRate));
 
         BuildLayout();
-        LoadSettingsIntoUi();
+        LoadConfigIntoUi();
         WireEvents();
-        UpdateEnabledUi();
+        UpdateKitUi();
         UpdateAudioUi();
 
-        Log("SampleDrum iniciado. O disparo automático começa DESATIVADO.");
-        Log($"Configurações: {AppSettings.FilePath}");
-        if (settingsNote is not null) Log(settingsNote);
-        if (!string.IsNullOrEmpty(_settings.SamplePath)) _sampleLoad = LoadSampleAsync(_settings.SamplePath);
+        Log("SampleDrum iniciado. O kit começa DESATIVADO.");
+        Log($"Configurações: {AppConfig.DefaultFilePath}");
+        if (cfgNote is not null) Log(cfgNote);
+        _initialLoad = LoadConfiguredSamplesAsync();
         _uiTimer.Start();
     }
 
+    private Library Lib => new(new SampleLibrary(_cfg.EffectiveSamplesFolder));
+
     // ---------- layout ----------
-
-    private static Label Lbl(string text) => new() { Text = text, AutoSize = true, Margin = new Padding(3, 7, 3, 0) };
-
-    private static NumericUpDown DbBox(int min, int max) =>
-        new() { Minimum = min, Maximum = max, DecimalPlaces = 1, Increment = 0.5m, Width = 70 };
-
-    private static NumericUpDown Box(int min, int max, int decimals, decimal increment) =>
-        new() { Minimum = min, Maximum = max, DecimalPlaces = decimals, Increment = increment, Width = 70 };
-
-    private static void SetNud(NumericUpDown nud, float value) =>
-        nud.Value = Math.Clamp((decimal)MathF.Round(value, nud.DecimalPlaces), nud.Minimum, nud.Maximum);
-
-    private static FlowLayoutPanel Row(params Control[] controls)
-    {
-        var row = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 2, 0, 2) };
-        row.Controls.AddRange(controls);
-        return row;
-    }
 
     private static GroupBox Group(string title, params Control[] rows)
     {
-        var flow = new FlowLayoutPanel
-        {
-            FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, Dock = DockStyle.Fill,
-        };
+        var flow = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false, Dock = DockStyle.Fill };
         flow.Controls.AddRange(rows);
-        var box = new GroupBox { Text = title, AutoSize = true, Dock = DockStyle.Fill, Padding = new Padding(8, 4, 8, 4) };
+        var box = new GroupBox { Text = title, AutoSize = true, Dock = DockStyle.Top, Padding = new Padding(8, 4, 8, 4) };
         box.Controls.Add(flow);
         return box;
     }
 
     private void BuildLayout()
     {
-        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(8) };
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        var root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, Padding = new Padding(6) };
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 74));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 26));
 
-        root.Controls.Add(Group("Áudio",
-            Row(Lbl("Driver:"), _cmbDriver, _btnPanel, _btnRefresh),
-            Row(Lbl("Entrada USB"), _nudIn, _lblInIdx, Lbl("    Saída USB"), _nudOut, _lblOutIdx),
-            Row(_btnStart, _btnStop, _lblAudio),
-            Row(_lblLatency)));
-
-        root.Controls.Add(Group("Sample",
-            Row(_btnWav, _lblWav),
-            Row(_btnTest, Lbl("(toca o sample no retorno mesmo com o disparo desativado)"))));
-
-        root.Controls.Add(Group("Disparo",
-            Row(_btnEnable, _lblEnabled),
-            Row(Lbl("Entrada:"), _meter, _led, _lblLevel),
-            Row(Lbl("Limiar (dBFS)"), _nudThreshold, Lbl("  Rearme (dBFS)"), _nudRearm,
-                Lbl("  Intervalo mínimo (ms)"), _nudInterval),
-            Row(_chkAdvanced),
-            _pnlAdvanced));
-
-        _pnlAdvanced.Controls.AddRange(
-        [
-            Row(Lbl("Passa-altas no detector (Hz, 0 = desligado)"), _nudHighPass,
-                Lbl("  Tempo de detecção (ms)"), _nudDetect),
-            Row(Lbl("Tempo de rearme (ms)"), _nudRearmTime,
-                Lbl("  Redisparo por subida (dB, 0 = desligado)"), _nudRetrigger),
-            Row(Lbl("Janela de velocidade (ms)"), _nudScan, _lblTriggerDelay),
-            Row(Lbl("Faixa de velocidade (dB)"), _nudVelRange, Lbl("  Ganho mínimo (dB)"), _nudMinGain),
-            Row(_chkFixedVelocity, _btnDefaults),
-        ]);
+        var content = new FlowLayoutPanel
+        {
+            FlowDirection = FlowDirection.TopDown, WrapContents = false, AutoScroll = true, Dock = DockStyle.Fill,
+        };
+        content.Controls.Add(Group("Áudio",
+            PiecePanel.Row(PiecePanel.Lbl("Driver:"), _cmbDriver, _btnPanel, _btnRefresh),
+            PiecePanel.Row(PiecePanel.Lbl("Perfil de rotas:"), _cmbProfile, _btnEditRoutes, _lblRouting),
+            _lstIssues,
+            PiecePanel.Row(_btnStart, _btnStop, _lblAudio),
+            PiecePanel.Row(_lblLatency)));
+        content.Controls.Add(Group("Kit",
+            PiecePanel.Row(_btnKit, _lblKit),
+            PiecePanel.Row(PiecePanel.Lbl("Preset:"), _cmbPresets, _btnLoadPreset, _btnPresetFile, _btnSavePreset),
+            PiecePanel.Row(PiecePanel.Lbl("Samples:"), _lblSamples, _btnSamplesFolder)));
+        foreach (var p in DrumPieces.All)
+        {
+            var panel = new PiecePanel(p) { Dock = DockStyle.None };
+            _panels[(int)p] = panel;
+            content.Controls.Add(panel);
+        }
+        root.Controls.Add(content, 0, 0);
 
         var logBox = new GroupBox { Text = "Status / log", Dock = DockStyle.Fill, Padding = new Padding(6) };
         logBox.Controls.Add(_txtLog);
-        root.Controls.Add(logBox);
-
+        root.Controls.Add(logBox, 0, 1);
         Controls.Add(root);
     }
 
-    private void LoadSettingsIntoUi()
+    private void LoadConfigIntoUi()
     {
         PopulateDrivers();
-        _nudIn.Value = Math.Clamp(_settings.InputDeskChannel, 1, ChannelMap.MaxChannels);
-        _nudOut.Value = Math.Clamp(_settings.OutputDeskChannel, 1, ChannelMap.MaxChannels);
-        ShowTriggerSettings(_engine.Settings); // normalized
-        _chkAdvanced.Checked = _settings.AdvancedExpanded;
-        UpdateAdvancedUi();
-        UpdateChannelLabels();
-    }
-
-    private void ShowTriggerSettings(TriggerSettings s)
-    {
-        _loadingUi = true;
-        try
+        PopulateProfiles();
+        var settings = _kit.Settings;
+        foreach (var p in DrumPieces.All)
         {
-            SetNud(_nudThreshold, s.ThresholdDb);
-            SetNud(_nudRearm, s.RearmDb);
-            SetNud(_nudInterval, s.MinIntervalMs);
-            SetNud(_nudHighPass, s.HighPassHz);
-            SetNud(_nudDetect, s.DetectTimeMs);
-            SetNud(_nudScan, s.ScanMs);
-            SetNud(_nudRearmTime, s.RearmTimeMs);
-            SetNud(_nudRetrigger, s.RetriggerRiseDb);
-            SetNud(_nudVelRange, s.VelocityRangeDb);
-            SetNud(_nudMinGain, s.MinGainDb);
-            _chkFixedVelocity.Checked = s.FixedVelocity;
+            var panel = _panels[(int)p];
+            panel.ShowSettings(settings[p]);
+            panel.SetPieceEnabled(_cfg[p].Enabled);
+            panel.AdvancedExpanded = _cfg[p].AdvancedExpanded;
+            panel.SetSampleText(_cfg[p].SamplePath is null ? "nenhum sample" : $"carregando {Path.GetFileName(_cfg[p].SamplePath)}...");
         }
-        finally { _loadingUi = false; }
-        UpdateMeterMarkers();
-        UpdateTriggerDelayLabel();
-    }
-
-    /// <summary>The sample starts max(detection time, velocity window) after the crossing: show that cost.</summary>
-    private void UpdateTriggerDelayLabel()
-    {
-        decimal delay = Math.Max(_nudDetect.Value, _nudScan.Value);
-        _lblTriggerDelay.Text = $"atraso do disparo = {delay:0.0} ms (maior entre detecção e janela; " +
-                                "janela maior = velocidade mais fiel, mais latência)";
-    }
-
-    private void UpdateAdvancedUi()
-    {
-        _pnlAdvanced.Visible = _chkAdvanced.Checked;
-        _chkAdvanced.Text = _chkAdvanced.Checked ? "Avançado ▾" : "Avançado ▸";
+        _lblSamples.Text = _cfg.EffectiveSamplesFolder;
+        RefreshPresetList();
+        RefreshRouting();
     }
 
     private void PopulateDrivers()
     {
-        string? keep = _cmbDriver.SelectedItem as string
-                       ?? (_settings.UseSimulation ? FakeAudioHost.DisplayName : _settings.DriverName);
+        string? keep = _cmbDriver.SelectedItem as string ?? (_cfg.UseSimulation ? FakeAudioHost.DisplayName : _cfg.DriverName);
         var names = AsioDuplexHost.GetDriverNames();
         _cmbDriver.Items.Clear();
         _cmbDriver.Items.Add(FakeAudioHost.DisplayName);
@@ -239,161 +153,328 @@ public sealed class MainForm : Form
         Log(names.Length == 0
             ? "Nenhum driver ASIO encontrado neste PC; disponível apenas \"Simulação (sem ASIO)\"."
             : $"Drivers ASIO encontrados: {string.Join(", ", names)}");
-        if (keep is not null && idx < 0)
-            Log($"AVISO: o driver salvo \"{keep}\" não está instalado/visível agora.");
+        if (keep is not null && idx < 0) Log($"AVISO: o driver salvo \"{keep}\" não está instalado/visível agora.");
+    }
+
+    private void PopulateProfiles()
+    {
+        _cmbProfile.Items.Clear();
+        foreach (var prof in _cfg.Profiles) _cmbProfile.Items.Add(prof.Name);
+        _cmbProfile.SelectedItem = _cfg.ActiveProfile.Name;
     }
 
     private void WireEvents()
     {
-        _nudIn.ValueChanged += (_, _) => UpdateChannelLabels();
-        _nudOut.ValueChanged += (_, _) => UpdateChannelLabels();
-        _cmbDriver.SelectedIndexChanged += (_, _) => _btnPanel.Enabled = !IsSimulationSelected;
+        _cmbDriver.SelectedIndexChanged += (_, _) => { UpdateAudioUi(); RefreshRouting(); };
         _btnRefresh.Click += (_, _) => PopulateDrivers();
         _btnPanel.Click += (_, _) => OpenAsioPanel();
+        _cmbProfile.SelectedIndexChanged += (_, _) =>
+        {
+            if (_cmbProfile.SelectedItem is string name && name != _cfg.ActiveProfileName)
+            {
+                _cfg.ActiveProfileName = name;
+                Log($"Perfil de rotas: {name}.");
+                SaveConfig();
+            }
+            RefreshRouting();
+        };
+        _btnEditRoutes.Click += (_, _) => EditRoutes();
         _btnStart.Click += async (_, _) => await StartAudioAsync();
         _btnStop.Click += (_, _) => StopAudio("Áudio parado pelo usuário.");
-        _btnWav.Click += async (_, _) => await ChooseWavAsync();
-        _btnTest.Click += (_, _) => TestSample();
-        _btnEnable.Click += (_, _) => { _engine.Enabled = !_engine.Enabled; UpdateEnabledUi(); };
-        _nudThreshold.ValueChanged += (_, _) => OnThresholdChanged();
-        foreach (var nud in new[] { _nudRearm, _nudInterval, _nudHighPass, _nudDetect, _nudScan, _nudRearmTime,
-                                    _nudRetrigger, _nudVelRange, _nudMinGain })
-            nud.ValueChanged += (_, _) => ApplyTriggerSettings();
-        _chkFixedVelocity.CheckedChanged += (_, _) => ApplyTriggerSettings();
-        _chkAdvanced.CheckedChanged += (_, _) => UpdateAdvancedUi();
-        _btnDefaults.Click += (_, _) => RestoreDefaults();
+        _btnKit.Click += (_, _) =>
+        {
+            _kit.KitEnabled = !_kit.KitEnabled;
+            Log(_kit.KitEnabled ? "Kit ATIVADO." : "Kit DESATIVADO (retornos em silêncio; teste manual continua funcionando).");
+            UpdateKitUi();
+        };
+        _btnLoadPreset.Click += async (_, _) =>
+        {
+            if (_cmbPresets.SelectedItem is PresetItem item) await ApplyPresetAsync(item.Preset);
+        };
+        _btnPresetFile.Click += async (_, _) => await OpenPresetFileAsync();
+        _btnSavePreset.Click += (_, _) => SavePreset();
+        _btnSamplesFolder.Click += (_, _) => ChooseSamplesFolder();
+
+        foreach (var panel in _panels)
+        {
+            var p = panel.Piece;
+            panel.SettingsChanged += (_, s) =>
+            {
+                _kit.UpdatePieceSettings(p, s);
+                _cfg.SetPieceSettings(p, s);
+            };
+            panel.PieceEnabledChanged += (_, on) =>
+            {
+                _kit.SetPieceEnabled(p, on);
+                _cfg[p].Enabled = on;
+                Log($"{p.Label()}: {(on ? "ativa" : "desativada (retorno em silêncio)")}.");
+                SaveConfig();
+            };
+            panel.TestRequested += (_, _) => TestPiece(p);
+            panel.ChooseWavRequested += async (_, _) => await ChooseWavAsync(p);
+            panel.ClearSampleRequested += async (_, _) => await SetPieceSampleAsync(p, null);
+        }
         _uiTimer.Tick += (_, _) => OnUiTick();
         FormClosing += (_, _) => OnClosing();
     }
 
     private bool IsSimulationSelected => _cmbDriver.SelectedIndex <= 0;
 
-    private void UpdateChannelLabels()
-    {
-        _lblInIdx.Text = $"(índice ASIO {ChannelMap.DeskToApiIndex((int)_nudIn.Value)})";
-        _lblOutIdx.Text = $"(índice ASIO {ChannelMap.DeskToApiIndex((int)_nudOut.Value)})";
-    }
+    // ---------- routing ----------
 
-    private void UpdateEnabledUi()
+    private void RefreshRouting()
     {
-        bool on = _engine.Enabled;
-        _btnEnable.Text = on ? "Desativar disparo" : "Ativar disparo";
-        _lblEnabled.Text = on ? "Disparo automático ATIVADO" : "Disparo automático DESATIVADO (retorno em silêncio)";
-        _lblEnabled.ForeColor = on ? Color.DarkGreen : Color.DarkRed;
-    }
-
-    private void UpdateAudioUi()
-    {
-        bool running = _host?.IsRunning == true;
-        _btnStart.Enabled = !running;
-        _btnStop.Enabled = running;
-        _cmbDriver.Enabled = _nudIn.Enabled = _nudOut.Enabled = _btnRefresh.Enabled = !running;
-        _btnPanel.Enabled = !IsSimulationSelected;
-        if (!running) _lblAudio.Text = "Áudio parado";
-    }
-
-    private void UpdateMeterMarkers()
-    {
-        _meter.ThresholdDb = (float)_nudThreshold.Value;
-        _meter.RearmDb = (float)_nudRearm.Value;
-    }
-
-    // ---------- actions ----------
-
-    /// <summary>Moving the threshold moves the re-arm level by the same amount (keeps the hysteresis).</summary>
-    private void OnThresholdChanged()
-    {
-        if (_loadingUi) return;
-        var moved = _engine.Settings.WithThreshold((float)_nudThreshold.Value);
-        _loadingUi = true;
-        try { SetNud(_nudRearm, moved.RearmDb); }
-        finally { _loadingUi = false; }
-        ApplyTriggerSettings();
-    }
-
-    private void ApplyTriggerSettings()
-    {
-        if (_loadingUi) return;
-        if (_nudRearm.Value > _nudThreshold.Value)
+        var v = RoutingValidator.Validate(_cfg.ActiveProfile);
+        foreach (var panel in _panels)
         {
-            _loadingUi = true;
-            try { _nudRearm.Value = _nudThreshold.Value; }
-            finally { _loadingUi = false; }
+            var p = panel.Piece;
+            var problem = v.IssuesOf(p).FirstOrDefault(i => i.IsError)?.Kind switch
+            {
+                RoutingIssueKind.DuplicateInput => "entrada repetida",
+                RoutingIssueKind.DuplicateOutput => "saída repetida",
+                RoutingIssueKind.Reserved => "canal reservado",
+                RoutingIssueKind.OutOfRange => "fora da faixa",
+                _ => null,
+            };
+            panel.SetRoute(_cfg.ActiveProfile[p], v.IsRunnable(p), problem ?? (_cfg.ActiveProfile[p].IsPending ? "pendente de configuração" : null));
         }
-        _engine.UpdateSettings(_engine.Settings with
-        {
-            ThresholdDb = (float)_nudThreshold.Value,
-            RearmDb = (float)_nudRearm.Value,
-            MinIntervalMs = (float)_nudInterval.Value,
-            HighPassHz = (float)_nudHighPass.Value,
-            DetectTimeMs = (float)_nudDetect.Value,
-            ScanMs = (float)_nudScan.Value,
-            RearmTimeMs = (float)_nudRearmTime.Value,
-            RetriggerRiseDb = (float)_nudRetrigger.Value,
-            VelocityRangeDb = (float)_nudVelRange.Value,
-            MinGainDb = (float)_nudMinGain.Value,
-            FixedVelocity = _chkFixedVelocity.Checked,
-        });
-        UpdateMeterMarkers();
-        UpdateTriggerDelayLabel();
-        UpdateLatencyLabel();
+
+        _lstIssues.Items.Clear();
+        foreach (var issue in v.Issues) _lstIssues.Items.Add((issue.IsError ? "ERRO: " : "Aviso: ") + issue.Message);
+        if (v.Issues.Count == 0) _lstIssues.Items.Add("Roteamento OK: as quatro peças têm entrada e saída.");
+        _lblRouting.Text = v.HasErrors
+            ? "há erros: o ASIO não inicia até corrigir"
+            : $"{v.RunnablePieces.Count} de {DrumPieces.Count} peças rodam no ASIO" +
+              (IsSimulationSelected ? " (na simulação as rotas não são usadas)" : "");
+        _lblRouting.ForeColor = v.HasErrors ? Color.DarkRed : SystemColors.ControlText;
     }
 
-    private void RestoreDefaults()
+    private void EditRoutes()
     {
-        var d = TriggerSettings.Default.Normalized();
-        ShowTriggerSettings(d);
-        _engine.UpdateSettings(d);
-        Log($"Padrões do detector restaurados: limiar {d.ThresholdDb:0.0} dBFS, rearme {d.RearmDb:0.0} dBFS, " +
-            $"intervalo {d.MinIntervalMs:0} ms, passa-altas {d.HighPassHz:0} Hz, detecção {d.DetectTimeMs:0.0} ms, " +
-            $"janela de velocidade {d.ScanMs:0.0} ms, " +
-            $"tempo de rearme {d.RearmTimeMs:0} ms, redisparo {d.RetriggerRiseDb:0.0} dB, faixa {d.VelocityRangeDb:0} dB, " +
-            $"ganho mínimo {d.MinGainDb:0} dB, velocidade {(d.FixedVelocity ? "fixa" : "variável")}.");
-    }
-
-    private async Task ChooseWavAsync()
-    {
-        using var dlg = new OpenFileDialog
-        {
-            Title = "Escolher sample de bumbo",
-            Filter = "Arquivos WAV (*.wav)|*.wav|Todos os arquivos (*.*)|*.*",
-        };
-        if (!string.IsNullOrEmpty(_settings.SamplePath))
-            dlg.InitialDirectory = Path.GetDirectoryName(_settings.SamplePath);
+        using var dlg = new RoutingEditorForm(_cfg.ActiveProfile);
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
-        _sampleLoad = LoadSampleAsync(dlg.FileName);
-        await _sampleLoad;
+        _cfg.SetProfile(dlg.Profile);
+        Log($"Rotas do perfil \"{dlg.Profile.Name}\" atualizadas" +
+            (_host?.IsRunning == true ? " (valem no próximo \"Iniciar áudio\")." : "."));
+        SaveConfig();
+        RefreshRouting();
     }
 
-    /// <summary>Reads + converts the WAV to mono float @ 48 kHz off the UI/audio threads, then swaps it into the engine.</summary>
-    private async Task LoadSampleAsync(string path)
+    // ---------- samples / presets ----------
+
+    private sealed record Library(SampleLibrary Samples);
+
+    private sealed record PresetItem(KitPreset Preset)
     {
-        _btnWav.Enabled = false;
-        _lblWav.Text = $"Carregando {Path.GetFileName(path)}...";
+        public override string ToString() => Preset.Name;
+    }
+
+    /// <summary>Startup: each configured sample is prepared on its own, so one bad file does not block the others.</summary>
+    private async Task LoadConfiguredSamplesAsync()
+    {
+        var lib = Lib.Samples;
+        var kit = PreparedKit.Empty(EngineRate, "configuração");
+        SetKitBusy(true);
         try
         {
-            var (samples, note) = await Task.Run(() =>
+            foreach (var p in DrumPieces.All)
             {
-                var data = WavFile.ReadMonoAtRate(path, EngineRate, out var n);
-                return (data, n);
-            });
-            _engine.SetSample(samples);
-            _sampleLoaded = true;
-            _settings.SamplePath = path;
-            _lblWav.Text = $"{Path.GetFileName(path)} ({samples.Length * 1000.0 / EngineRate:0} ms @ {EngineRate} Hz)";
-            Log($"Sample carregado: {path} ({samples.Length} amostras, {samples.Length * 1000.0 / EngineRate:0} ms).");
-            if (note is not null) Log(note);
+                var path = _cfg[p].SamplePath;
+                if (path is null) continue;
+                var r = await lib.PreparePieceAsync(kit, p, path);
+                LogNotes(r);
+                if (r.Success) { kit = r.Kit!; _panels[(int)p].SetSampleText(SampleText(kit[p])); }
+                else ShowPieceErrors(r);
+            }
+            _kit.ApplyKit(kit);
         }
         catch (Exception ex)
         {
-            _lblWav.Text = _sampleLoaded ? _lblWav.Text : "Nenhum sample carregado";
-            Log($"ERRO ao carregar o sample \"{path}\": {ex.Message}");
+            Log($"ERRO ao carregar os samples: {ex.Message}");
         }
-        finally
+        finally { SetKitBusy(false); }
+    }
+
+    private async Task ChooseWavAsync(DrumPiece p)
+    {
+        using var dlg = new OpenFileDialog
         {
-            _btnWav.Enabled = true;
+            Title = $"Escolher sample: {p.Label()}",
+            Filter = "Arquivos WAV (*.wav)|*.wav|Todos os arquivos (*.*)|*.*",
+        };
+        var current = _cfg[p].SamplePath;
+        dlg.InitialDirectory = current is not null && Path.IsPathRooted(current) ? Path.GetDirectoryName(current)
+            : Directory.Exists(_cfg.EffectiveSamplesFolder) ? _cfg.EffectiveSamplesFolder : null;
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        await SetPieceSampleAsync(p, dlg.FileName);
+    }
+
+    /// <summary>Single-piece change: prepare off the UI thread, then one ApplyKit (valid from the next hit).</summary>
+    private async Task SetPieceSampleAsync(DrumPiece p, string? path)
+    {
+        if (!TryBeginKitWork()) return;
+        try
+        {
+            var r = await Lib.Samples.PreparePieceAsync(_kit.ActiveKit ?? PreparedKit.Empty(EngineRate), p, path);
+            LogNotes(r);
+            if (!r.Success)
+            {
+                ShowPieceErrors(r);
+                Log($"{p.Label()}: sample anterior mantido.");
+                return;
+            }
+            _kit.ApplyKit(r.Kit!);
+            _cfg[p].SamplePath = path;
+            _panels[(int)p].SetSampleText(SampleText(r.Kit![p]));
+            Log(path is null ? $"{p.Label()}: sem sample." : $"{p.Label()}: sample {path} (vale a partir do próximo golpe).");
+            SaveConfig();
+        }
+        catch (Exception ex) { Log($"ERRO ao carregar o sample de {p.Label()}: {ex.Message}"); }
+        finally { SetKitBusy(false); }
+    }
+
+    /// <summary>Applies a preset: prepare ALL samples off the UI thread; only a complete kit is applied (one swap).</summary>
+    private async Task ApplyPresetAsync(KitPreset preset)
+    {
+        if (!TryBeginKitWork()) return;
+        try
+        {
+            Log($"Preparando o preset \"{preset.Name}\"...");
+            var r = await Lib.Samples.PrepareAsync(preset, EngineRate);
+            LogNotes(r);
+            if (!r.Success)
+            {
+                ShowPieceErrors(r);
+                Log($"Preset \"{preset.Name}\" NÃO aplicado: o kit atual foi mantido.");
+                return;
+            }
+            _kit.ApplyKit(r.Kit!);
+            _cfg.ApplyPreset(preset);
+            var settings = _kit.Settings;
+            foreach (var p in DrumPieces.All)
+            {
+                _panels[(int)p].ShowSettings(settings[p]);
+                _panels[(int)p].SetSampleText(SampleText(r.Kit![p]));
+            }
+            Log($"Preset \"{preset.Name}\" aplicado (as quatro peças trocadas no mesmo bloco).");
+            SaveConfig();
+        }
+        catch (Exception ex) { Log($"ERRO ao aplicar o preset: {ex.Message}"); }
+        finally { SetKitBusy(false); }
+    }
+
+    private async Task OpenPresetFileAsync()
+    {
+        using var dlg = new OpenFileDialog { Title = "Abrir preset de kit", Filter = "Preset SampleDrum (*.json)|*.json" };
+        if (Directory.Exists(_cfg.EffectivePresetsFolder)) dlg.InitialDirectory = _cfg.EffectivePresetsFolder;
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        KitPreset preset;
+        try { preset = KitPreset.Load(dlg.FileName); }
+        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
+        {
+            Log($"ERRO ao ler o preset: {ex.Message}");
+            return;
+        }
+        await ApplyPresetAsync(preset);
+    }
+
+    private void SavePreset()
+    {
+        string? name = Prompt("Salvar preset", "Nome do preset:", _kit.ActiveKit?.Name is { Length: > 0 } n && n != "configuração" ? n : "Kit");
+        if (string.IsNullOrWhiteSpace(name)) return;
+        string path = Path.Combine(_cfg.EffectivePresetsFolder, KitPreset.FileNameFor(name));
+        try
+        {
+            _cfg.ToPreset(name.Trim()).Save(path);
+            Log($"Preset salvo: {path}");
+            RefreshPresetList(name.Trim());
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Log($"ERRO ao salvar o preset: {ex.Message}");
         }
     }
+
+    private void RefreshPresetList(string? select = null)
+    {
+        var presets = KitPreset.LoadFolder(_cfg.EffectivePresetsFolder, out var errors);
+        _cmbPresets.Items.Clear();
+        foreach (var p in presets) _cmbPresets.Items.Add(new PresetItem(p));
+        foreach (var e in errors) Log($"AVISO: preset ignorado: {e}");
+        var match = _cmbPresets.Items.Cast<PresetItem>().FirstOrDefault(i => i.Preset.Name == select);
+        if (match is not null) _cmbPresets.SelectedItem = match;
+        else if (_cmbPresets.Items.Count > 0) _cmbPresets.SelectedIndex = 0;
+        _btnLoadPreset.Enabled = _cmbPresets.Items.Count > 0 && !_kitBusy;
+    }
+
+    private void ChooseSamplesFolder()
+    {
+        using var dlg = new FolderBrowserDialog { Description = "Pasta com os samples (WAV)", UseDescriptionForTitle = true };
+        if (Directory.Exists(_cfg.EffectiveSamplesFolder)) dlg.SelectedPath = _cfg.EffectiveSamplesFolder;
+        if (dlg.ShowDialog(this) != DialogResult.OK) return;
+        _cfg.SamplesFolder = dlg.SelectedPath;
+        _lblSamples.Text = dlg.SelectedPath;
+        var list = Lib.Samples.List();
+        Log($"Pasta de samples: {dlg.SelectedPath} ({list.Count} WAV)" +
+            (list.Count > 0 ? ": " + string.Join(", ", list.Take(12).Select(s => $"{s.Name} ({s.DurationSeconds * 1000:0} ms)")) +
+                              (list.Count > 12 ? ", ..." : "") : ""));
+        SaveConfig();
+    }
+
+    private bool TryBeginKitWork()
+    {
+        if (_kitBusy) { Log("Aguarde: um sample/preset ainda está sendo preparado."); return false; }
+        SetKitBusy(true);
+        return true;
+    }
+
+    private void SetKitBusy(bool busy)
+    {
+        _kitBusy = busy;
+        foreach (var panel in _panels) panel.SetBusy(busy);
+        _btnLoadPreset.Enabled = !busy && _cmbPresets.Items.Count > 0;
+        _btnPresetFile.Enabled = !busy;
+    }
+
+    private static string SampleText(PreparedPiece piece) => piece.Samples is null
+        ? "nenhum sample"
+        : $"{piece.Name} ({piece.Samples.Length * 1000.0 / EngineRate:0} ms)";
+
+    private void ShowPieceErrors(KitPrepareResult r)
+    {
+        foreach (var e in r.Errors)
+        {
+            Log("ERRO: " + e.Message);
+            _panels[(int)e.Piece].SetSampleText("erro: " + e.Message, isError: true);
+        }
+    }
+
+    private void LogNotes(KitPrepareResult r)
+    {
+        foreach (var n in r.Notes) Log("Aviso: " + n);
+    }
+
+    private static string? Prompt(string title, string label, string initial)
+    {
+        using var form = new Form
+        {
+            Text = title, FormBorderStyle = FormBorderStyle.FixedDialog, StartPosition = FormStartPosition.CenterParent,
+            MaximizeBox = false, MinimizeBox = false, AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, Padding = new Padding(10),
+        };
+        var box = new TextBox { Text = initial, Width = 320 };
+        var ok = new Button { Text = "OK", DialogResult = DialogResult.OK, AutoSize = true };
+        var cancel = new Button { Text = "Cancelar", DialogResult = DialogResult.Cancel, AutoSize = true };
+        var flow = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, Dock = DockStyle.Fill };
+        flow.Controls.Add(PiecePanel.Lbl(label));
+        flow.Controls.Add(box);
+        flow.Controls.Add(PiecePanel.Row(ok, cancel));
+        form.Controls.Add(flow);
+        form.AcceptButton = ok;
+        form.CancelButton = cancel;
+        return form.ShowDialog() == DialogResult.OK ? box.Text : null;
+    }
+
+    // ---------- audio ----------
 
     private async Task StartAudioAsync()
     {
@@ -401,8 +482,36 @@ public sealed class MainForm : Form
         _btnStart.Enabled = false;
         try
         {
-            if (_sampleLoad is not null) await _sampleLoad; // the sample is ready BEFORE audio starts
-            if (!_sampleLoaded) Log("AVISO: nenhum sample carregado; o retorno ficará em silêncio.");
+            if (_initialLoad is not null) await _initialLoad; // samples ready BEFORE audio starts
+
+            IAudioHost host;
+            if (IsSimulationSelected)
+            {
+                // TEMPORARY until the harness worker's multi-channel FakeAudioHost lands: the v1 simulation feeds its
+                // synthetic kick into the Bumbo pipeline; the other pieces get silence (their manual tests still play).
+                host = new FakeAudioHost(new KickSimulationAdapter(_kit), EngineRate);
+                Log("Simulação: bumbo sintético no canal do Bumbo (caixa/tom/surdo sem entrada nesta versão da simulação).");
+            }
+            else
+            {
+                var v = RoutingValidator.Validate(_cfg.ActiveProfile);
+                RefreshRouting();
+                if (v.HasErrors)
+                {
+                    string errors = string.Join("\r\n", v.Issues.Where(i => i.IsError).Select(i => "• " + i.Message));
+                    Log("ERRO: o roteamento tem erros; o áudio não foi iniciado.\r\n" + errors);
+                    MessageBox.Show(this, "Corrija o roteamento antes de iniciar:\r\n\r\n" + errors,
+                        "SampleDrum – roteamento inválido", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    return;
+                }
+                foreach (var issue in v.Issues) Log("Aviso: " + issue.Message);
+                var routing = v.Resolve();
+                string driver = (string)_cmbDriver.SelectedItem!;
+                Log($"Abrindo \"{driver}\" com {routing.RoutedPieces.Count} peça(s): " + string.Join(", ", routing.RoutedPieces.Select(p =>
+                    $"{p.Label()} entrada USB {routing.InputIndex(p) + 1} (índice ASIO {routing.InputIndex(p)}) → " +
+                    $"saída USB {routing.OutputIndex(p) + 1} (índice ASIO {routing.OutputIndex(p)})")) + "...");
+                host = new AsioDuplexHost(driver, routing, _kit);
+            }
 
             DisposeHost();
             // A previous run may have been stopped mid-voice/mid-detection: start from a clean engine state.
@@ -414,29 +523,17 @@ public sealed class MainForm : Form
             }
             else
             {
-                _engine.Reset();
+                _kit.Reset();
             }
-            if (IsSimulationSelected)
-            {
-                _host = new FakeAudioHost(_engine, EngineRate);
-            }
-            else
-            {
-                string driver = (string)_cmbDriver.SelectedItem!;
-                int inIdx = ChannelMap.DeskToApiIndex((int)_nudIn.Value);
-                int outIdx = ChannelMap.DeskToApiIndex((int)_nudOut.Value);
-                Log($"Abrindo \"{driver}\": entrada USB {(int)_nudIn.Value} (índice ASIO {inIdx}), " +
-                    $"saída USB {(int)_nudOut.Value} (índice ASIO {outIdx})...");
-                _host = new AsioDuplexHost(driver, inIdx, outIdx, _engine);
-            }
-            var host = _host;
+
+            _host = host;
             // Faulted may come from a non-UI thread (simulation thread, ThreadPool): always marshal.
             host.Faulted += msg => PostToUi(() => OnHostFaulted(host, msg));
             host.Start();
             Log("Áudio iniciado: " + host.Description);
             UpdateLatencyLabel();
             Log("Para anotar no ensaio: " + _lblLatency.Text);
-            SaveSettings();
+            SaveConfig();
         }
         catch (AudioHostException ex)
         {
@@ -491,11 +588,12 @@ public sealed class MainForm : Form
         }
     }
 
-    private void TestSample()
+    private void TestPiece(DrumPiece p)
     {
-        _engine.RequestTest(1f);
-        if (_host?.IsRunning != true) Log("Teste pedido, mas o áudio está parado: clique em \"Iniciar áudio\" para ouvir.");
-        else if (!_sampleLoaded) Log("Teste pedido, mas nenhum sample está carregado.");
+        _kit.RequestTest(p, 1f);
+        if (_host?.IsRunning != true) Log($"{p.Label()}: teste pedido, mas o áudio está parado (clique em \"Iniciar áudio\").");
+        else if (_kit.ActiveKit?[p].Samples is null) Log($"{p.Label()}: teste pedido, mas a peça não tem sample.");
+        else if (_host is AsioDuplexHost h && !h.Routing.IsRouted(p)) Log($"{p.Label()}: teste pedido, mas a peça não tem rota (pendente): nada sai na mesa.");
     }
 
     private void OpenAsioPanel()
@@ -507,65 +605,72 @@ public sealed class MainForm : Form
         catch (Exception ex) { Log("ERRO ao abrir o painel ASIO: " + ex.Message); }
     }
 
+    private void UpdateKitUi()
+    {
+        bool on = _kit.KitEnabled;
+        _btnKit.Text = on ? "Desativar kit" : "Ativar kit";
+        _lblKit.Text = on ? "Kit ATIVADO (disparo automático nas peças ativas)" : "Kit DESATIVADO (retornos em silêncio)";
+        _lblKit.ForeColor = on ? Color.DarkGreen : Color.DarkRed;
+    }
+
+    private void UpdateAudioUi()
+    {
+        bool running = _host?.IsRunning == true;
+        _btnStart.Enabled = !running;
+        _btnStop.Enabled = running;
+        _cmbDriver.Enabled = _btnRefresh.Enabled = _cmbProfile.Enabled = !running;
+        _btnPanel.Enabled = !IsSimulationSelected;
+        if (!running) _lblAudio.Text = "Áudio parado";
+    }
+
     // ---------- 30 Hz UI refresh ----------
 
     private void OnUiTick()
     {
         var now = DateTime.UtcNow;
-
-        float peak = _engine.ReadAndResetInputPeak();
-        float db = peak > 1e-6f ? 20f * MathF.Log10(peak) : LevelMeter.MinDb;
-        _meterDb = Math.Max(db, _meterDb - 1.5f); // ~45 dB/s fall
-        if (db >= _holdDb || now > _holdUntil) { _holdDb = db; _holdUntil = now.AddSeconds(1.5); }
-        _meter.LevelDb = _meterDb;
-        _meter.PeakHoldDb = _holdDb;
-        _lblLevel.Text = _holdDb <= LevelMeter.MinDb ? "-∞ dBFS" : $"{_holdDb:0.0} dBFS";
+        foreach (var panel in _panels) panel.UpdateMeter(_kit.ReadAndResetInputPeak(panel.Piece), now);
 
         StringBuilder? sb = null;
         int drained = 0;
-        while (drained < 256 && _engine.TryDequeueEvent(out var e))
+        while (drained < 256 && _kit.TryDequeueEvent(out var ke))
         {
             drained++;
-            _eventCount++;
-            _ledUntil = now.AddMilliseconds(120);
-            _ledManual = e.IsManualTest;
+            var e = ke.Event;
+            _panels[(int)ke.Piece].Flash(e.IsManualTest, now);
             sb ??= new StringBuilder();
             double t = e.SampleIndex / (double)EngineRate;
             if (e.IsManualTest)
-                sb.Append($"{Stamp()} Teste manual (t={t:0.000} s, ganho {e.Velocity:0.00})\r\n");
+                sb.Append($"{Stamp()} {ke.Piece.Label()}: teste manual (t={t:0.000} s, ganho {e.Velocity:0.00})\r\n");
             else
-                sb.Append($"{Stamp()} Disparo #{_eventCount}{(e.IsRetrigger ? " (redisparo)" : "")}: t={t:0.000} s, " +
+            {
+                _eventCount++;
+                sb.Append($"{Stamp()} {ke.Piece.Label()}: disparo #{_eventCount}{(e.IsRetrigger ? " (redisparo)" : "")} t={t:0.000} s, " +
                           $"pico {ToDb(e.Peak):0.0} dBFS, velocidade {e.Velocity:0.00}, ganho {ToDb(e.Gain):0.0} dB\r\n");
+            }
         }
         if (sb is not null) AppendLog(sb.ToString());
 
-        bool lit = now < _ledUntil;
-        _led.BackColor = lit ? (_ledManual ? Color.Gold : Color.Lime) : Color.FromArgb(0, 60, 0);
-
         if (_host?.IsRunning == true)
-        {
-            string extra = _host is FakeAudioHost f ? $", saída {ToDb(f.ReadAndResetOutputPeak()):0} dBFS" : "";
-            _lblAudio.Text = $"Rodando: {_host.CallbackCount} blocos de {_host.FramesPerBuffer}, {_eventCount} eventos{extra}";
-        }
+            _lblAudio.Text = $"Rodando: {_host.CallbackCount} blocos de {_host.FramesPerBuffer}, {_eventCount} disparos";
         UpdateLatencyLabel();
     }
 
-    /// <summary>Buffer size and latencies measured/reported by the running host, for the operator to note.</summary>
+    /// <summary>Buffer size and latencies reported by the running host, for the operator to note.</summary>
     private void UpdateLatencyLabel()
     {
         string text;
         var h = _host;
-        if (h is null || !h.IsRunning)
-            text = "Buffer/latência: áudio parado";
+        if (h is null || !h.IsRunning) text = "Buffer/latência: áudio parado";
         else
         {
             double rate = h.SampleRate > 0 ? h.SampleRate : EngineRate;
             double Ms(int samples) => samples * 1000.0 / rate;
-            var s = _engine.Settings;
-            double detectMs = Math.Max(s.DetectTimeMs, s.ScanMs);
+            var s = _kit.Settings;
+            var pieces = h is AsioDuplexHost a ? a.Routing.RoutedPieces : DrumPieces.All;
+            double detectMs = pieces.Count == 0 ? 0 : pieces.Max(p => Math.Max(s[p].Trigger.DetectTimeMs, s[p].Trigger.ScanMs));
             if (h is FakeAudioHost)
                 text = $"Simulação: bloco {h.FramesPerBuffer} amostras = {Ms(h.FramesPerBuffer):0.00} ms @ {rate:0} Hz " +
-                       $"(sem driver); detecção +{detectMs:0.0} ms";
+                       $"(sem driver); detecção até +{detectMs:0.0} ms";
             else
             {
                 int inL = h.InputLatencySamples, outL = h.OutputLatencySamples;
@@ -587,31 +692,57 @@ public sealed class MainForm : Form
 
     private void AppendLog(string text)
     {
-        if (_txtLog.TextLength > 200_000)
-        {
-            _txtLog.Text = _txtLog.Text[^100_000..];
-        }
+        if (_txtLog.TextLength > 200_000) _txtLog.Text = _txtLog.Text[^100_000..];
         _txtLog.AppendText(text);
     }
 
-    // ---------- settings / shutdown ----------
+    // ---------- config / shutdown ----------
 
-    private void SaveSettings()
+    private void SaveConfig()
     {
-        _settings.UseSimulation = IsSimulationSelected;
-        if (!IsSimulationSelected) _settings.DriverName = (string)_cmbDriver.SelectedItem!;
-        _settings.InputDeskChannel = (int)_nudIn.Value;
-        _settings.OutputDeskChannel = (int)_nudOut.Value;
-        _settings.FromTriggerSettings(_engine.Settings);
-        _settings.AdvancedExpanded = _chkAdvanced.Checked;
-        try { _settings.Save(); }
-        catch (Exception ex) { Log($"AVISO: não foi possível salvar {AppSettings.FilePath}: {ex.Message}"); }
+        _cfg.UseSimulation = IsSimulationSelected;
+        if (!IsSimulationSelected) _cfg.DriverName = (string)_cmbDriver.SelectedItem!;
+        foreach (var panel in _panels) _cfg[panel.Piece].AdvancedExpanded = panel.AdvancedExpanded;
+        try { _cfg.Save(); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Log($"AVISO: não foi possível salvar {AppConfig.DefaultFilePath}: {ex.Message}");
+        }
     }
 
     private void OnClosing()
     {
         _uiTimer.Stop();
         DisposeHost();
-        SaveSettings();
+        SaveConfig();
+    }
+
+    /// <summary>
+    /// TEMPORARY bridge for the v1 single-channel <see cref="FakeAudioHost"/>: its mono input drives the Bumbo
+    /// pipeline, the other pieces get silence, and the four returns are summed into its (metered, discarded) output.
+    /// Allocation-free; replaced when the multi-channel simulation host is available.
+    /// </summary>
+    private sealed class KickSimulationAdapter(KitEngine kit) : IBlockProcessor
+    {
+        private const int Max = 8192;
+        private readonly float[][] _in = DrumPieces.All.Select(_ => new float[Max]).ToArray();
+        private readonly float[][] _out = DrumPieces.All.Select(_ => new float[Max]).ToArray();
+
+        public void Process(ReadOnlySpan<float> input, Span<float> output)
+        {
+            for (int off = 0; off < input.Length; off += Max)
+            {
+                int n = Math.Min(Max, input.Length - off);
+                input.Slice(off, n).CopyTo(_in[(int)DrumPiece.Kick]);
+                foreach (var o in _out) o.AsSpan(0, n).Clear();
+                kit.Process(_in, _out, n);
+                var dst = output.Slice(off, Math.Min(n, Math.Max(0, output.Length - off)));
+                for (int p = 0; p < _out.Length; p++)
+                {
+                    var src = _out[p];
+                    for (int i = 0; i < dst.Length; i++) dst[i] += src[i];
+                }
+            }
+        }
     }
 }

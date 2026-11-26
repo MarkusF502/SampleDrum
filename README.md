@@ -1,31 +1,41 @@
 # SampleDrum
 
-Reforço de bumbo com sample, gratuito e independente (sem REAPER, Slate ou outra DAW), para o PC Windows da
-igreja que também roda o OBS Studio.
+Reforço de bateria com samples, gratuito e independente (sem REAPER, Slate ou outra DAW), para o PC Windows da
+igreja que também roda o OBS Studio. Versão 2: **bumbo, caixa, tom e surdo**.
 
-O SampleDrum recebe o microfone do bumbo isolado vindo da Behringer X32 pelo X-USB (ASIO, 48 kHz), detecta
-cada golpe e devolve **só o sample** para a mesa, num canal de retorno. A equipe de som mistura o sample com o
-microfone original na mesa.
+O SampleDrum recebe o microfone isolado de cada peça vindo da Behringer X32 pelo X-USB (ASIO, 48 kHz), detecta
+cada golpe e devolve **só o sample** daquela peça para a mesa, num retorno próprio. A equipe de som mistura os
+samples com os microfones originais na mesa.
 
 ## O que faz
 
-- Detecta os golpes do bumbo num canal de entrada ASIO, com limiar, histerese, intervalo mínimo e redisparo
-  durante o sustain (ver [docs/research/lsp-trigger.md](docs/research/lsp-trigger.md)).
-- Toca um sample WAV (carregado e convertido para 48 kHz mono) num canal de saída ASIO, com volume
-  proporcional à força do golpe (ou fixo) e início com precisão de amostra.
-- Botão **Testar sample** (toca o sample uma vez, mesmo com o disparo desativado) e
-  **Ativar/Desativar disparo** (desativado = retorno em silêncio absoluto).
-- Modo **Simulação (sem ASIO)** para testar a interface sem a mesa, `--selftest` sem hardware e um
-  **modo offline** que processa arquivos WAV com exatamente o mesmo motor do modo ao vivo.
-- Guarda os ajustes em `%AppData%\SampleDrum\settings.json` (canais na numeração da mesa).
+- Quatro peças **independentes** (Bumbo, Caixa, Tom, Surdo): cada uma tem entrada, retorno, detector, vozes,
+  sample, ganho e ajustes próprios. Golpes de peças diferentes no mesmo bloco de áudio são tratados com precisão
+  de amostra, sem interferência entre elas.
+- Detecção com limiar, histerese, intervalo mínimo e redisparo durante o sustain (ver
+  [docs/research/lsp-trigger.md](docs/research/lsp-trigger.md)); volume do sample proporcional à força do golpe
+  (ou fixo).
+- Um botão **Ativar kit / Desativar kit** (o kit sempre começa **desativado**; desativado = retornos em silêncio
+  absoluto) e, por peça, a caixa **Ativa**, o botão **Testar** (toca o sample uma vez, mesmo com o kit
+  desativado), medidor de entrada e LED de disparo.
+- **Samples por peça** (WAV de qualquer taxa/canais, convertido para 48 kHz mono fora da thread de áudio) e
+  **presets de kit** (arquivos JSON). Trocar um preset troca as quatro peças **no mesmo bloco**: os golpes já
+  disparados terminam com o sample antigo, os próximos usam o novo. Se algum arquivo do preset falhar, nada é
+  trocado e o kit atual continua.
+- **Perfis de roteamento** (Igreja / Simulação) editáveis, com **validação visível** antes de iniciar.
+- Modo **Simulação (sem ASIO)**, `--selftest` sem hardware e **modo offline** que processa arquivos WAV com o
+  mesmo motor do modo ao vivo. Nesta versão a simulação da janela alimenta só o **bumbo** com um bumbo sintético
+  (as outras peças ficam sem entrada; o **Testar** delas funciona); a simulação das quatro peças com WAVs de
+  microfone e prévia nos alto-falantes do PC chega com o trabalho do harness.
+- Guarda tudo em `%AppData%\SampleDrum\settings.json` (versão 2; canais na numeração da mesa).
 
 ## O que não faz
 
 - **Não altera** a taxa de amostragem nem o tamanho de buffer do driver (o OBS compartilha o X-USB):
   se o driver não estiver a 48 kHz, o app recusa iniciar e explica.
 - **Não altera** o roteamento da X32 nem do OBS. Toda a configuração da mesa é feita pela equipe.
-- Não mistura o microfone original, não grava, não é DAW nem plug-in VST, não usa MIDI.
-- Versão 1: só bumbo, uma entrada e uma saída.
+- **Nunca usa** as entradas USB 1/2 do PC (OBS, MixBus 13/14) nem o Aux 4 "Celular".
+- Não mistura os microfones originais, não grava, não é DAW nem plug-in VST, não usa MIDI.
 
 ## Requisitos
 
@@ -69,7 +79,7 @@ Detalhes do detector, dos padrões e dos testes: [docs/README-dev.md](docs/READM
 # rodar a interface
 dotnet run -c Release --project src/SampleDrum.App
 
-# teste sem hardware (simulação + motor + conversores ASIO); grava a saída num arquivo
+# teste sem hardware; grava a saída num arquivo
 .\src\SampleDrum.App\bin\Release\net10.0-windows\SampleDrum.App.exe --selftest > selftest.txt; Get-Content selftest.txt
 
 # listar os drivers ASIO instalados
@@ -80,28 +90,85 @@ dotnet publish src/SampleDrum.App -c Release -r win-x64 --self-contained -o publ
 ```
 
 O app é um programa de janela (WinExe): para `--selftest` e `--list-drivers`, redirecione a saída para um
-arquivo como acima (no console ela pode aparecer misturada ao prompt). `--selftest` termina com
-`RESULTADO: OK` e código de saída 0. A pasta `publish\` não deve ser versionada; copie-a inteira para o PC
-e rode `SampleDrum.App.exe`.
+arquivo como acima. `--selftest` termina com `RESULTADO: OK` e código de saída 0. A pasta `publish\` não deve
+ser versionada; copie-a inteira para o PC e rode `SampleDrum.App.exe`.
 
 Detalhes do ASIO/NAudio: [docs/asio-naudio.md](docs/asio-naudio.md).
 
-## Perfil de roteamento padrão (cena de teste)
+## A janela
+
+- **Áudio**: driver (ou "Simulação (sem ASIO)"), **Perfil de rotas** (Igreja / Simulação) com **Editar
+  rotas...**, a **lista de validação** do roteamento, Iniciar/Parar áudio e a linha de buffer/latência.
+- **Kit**: **Ativar kit / Desativar kit**; preset (**Aplicar preset**, **Abrir arquivo...**,
+  **Salvar preset...**); pasta de samples.
+- Uma faixa por peça (**Bumbo, Caixa, Tom, Surdo**): **Ativa**, rota na numeração da mesa ("Entrada USB 3
+  (índice ASIO 2)" ou "pendente"), medidor + LED (verde = disparo, azul = teste), sample (**Escolher WAV...**,
+  **Sem sample**), **Ganho (dB)**, **Testar**, limiar/rearme/intervalo mínimo e o grupo **Avançado ▸**
+  (passa-altas, passa-baixas, tempo de detecção, janela de velocidade, tempo de rearme, redisparo, faixa de
+  velocidade, ganho mínimo, velocidade fixa, restaurar padrões da peça).
+
+Presets ficam em `%AppData%\SampleDrum\Presets` (um `.json` por preset) e a pasta de samples padrão é
+`%AppData%\SampleDrum\Samples` (pode ser trocada). Um preset guarda, por peça, o sample, o ganho e só os
+ajustes de detecção que diferem do padrão da peça.
+
+## Peças e padrões de detecção
+
+| Peça | Microfone (mesa) | Padrões iniciais (a calibrar com gravação real) |
+|---|---|---|
+| Bumbo | CH 21 / AES50 B21 | os da v1: limiar −24 dBFS, passa-altas 40 Hz, intervalo mínimo 35 ms |
+| Caixa | CH 19 / AES50 B19 | limiar −20 dBFS, passa-altas 100 Hz (tira o vazamento do bumbo), intervalo 25 ms (rulos/flams), faixa de velocidade 30 dB (ghost notes) |
+| Tom | CH 18 / AES50 B18 | limiar −20 dBFS (o microfone ouve o kit inteiro), passa-altas 60 Hz, intervalo 30 ms |
+| Surdo | CH 17 / AES50 B17 | limiar −22 dBFS, passa-altas 50 Hz, release do envelope 20 ms (fundamental grave, perto do bumbo) |
+
+O porquê de cada valor está em [docs/README-dev.md](docs/README-dev.md).
+
+## Perfis de roteamento
 
 A mesa e o X-USB numeram canais a partir de **1**; a API ASIO usa índices a partir de **0**:
-`índice ASIO = canal USB − 1`. O app mostra os dois, por exemplo "Entrada USB 3 (índice ASIO 2)".
+`índice ASIO = canal USB − 1`. **Entrada** = mesa → PC (envio USB, entrada ASIO); **saída** = PC → mesa
+(retorno USB, saída ASIO).
 
-| Função | Caminho na mesa | Canal USB | Índice ASIO |
-|---|---|---|---|
-| Microfone do bumbo | AES50 B21 → **CH 21** | — | — |
-| Envio para o app (entrada do PC) | **User Out 3** (fonte: CH 21) → entrada USB 3 do PC | 3 | **entrada 2** |
-| Retorno do app (saída do PC) | saída USB 1 do PC → **Card In 1** → **Aux 1** | 1 | **saída 0** |
+### Igreja (cena de teste)
 
-- O bloco **Aux In** foi remapeado para **Card 1-2**, de modo que Card In 1 chega no **Aux 1**.
-  O **Aux 4 não é alterado**.
-- O **OBS** recebe os **MixBus 13/14** pelas **USB 1/2 no sentido contrário** (mesa → PC, entradas USB 1/2
-  do PC). Isso não conflita com o retorno do app, que usa a **saída** USB 1 (PC → mesa).
-- Na mesa, o Aux 1 (sample) é misturado com o CH 21 (microfone original) pela equipe.
+| Peça | Entrada (mesa → PC) | Saída (PC → mesa) |
+|---|---|---|
+| Bumbo | **User Out 3** (fonte CH 21) → USB 3 → **índice ASIO 2** | USB 1 (**índice ASIO 0**) → **Card In 1** → **Aux 1** |
+| Caixa | pendente de configuração | pendente de configuração |
+| Tom | pendente de configuração | pendente de configuração |
+| Surdo | pendente de configuração | pendente de configuração |
+
+- Reservado: **entradas USB 1/2 do PC** = **OBS MixBus 13/14** (mesa → PC). O app nunca as usa como entrada.
+  Isso não conflita com o retorno do bumbo, que usa a **saída** USB 1 (PC → mesa): mesmo número, caminho
+  físico diferente.
+- O bloco **Aux In** foi remapeado para **Card 1-2**, de modo que Card In 1 chega no **Aux 1**. O **Aux 4
+  "Celular" não é usado nem alterado**.
+- Quando a equipe definir na mesa os envios/retornos da caixa, do tom e do surdo, preencha-os em **Editar
+  rotas...** (perfil Igreja).
+
+### Simulação
+
+Quatro pares definidos, para testar sem a mesa: Bumbo entrada USB 3 / saída USB 1, Caixa 4 / 2, Tom 5 / 3,
+Surdo 6 / 4 (entradas longe das USB 1/2 do OBS). Na **Simulação (sem ASIO)** as rotas não são usadas; o perfil
+serve para validar o roteamento de quatro peças.
+
+### Regra das rotas pendentes e validação
+
+- **Pendente** (entrada e/ou saída sem canal) não é erro: aquela peça **não roda no ASIO** e as outras rodam
+  normalmente. A faixa da peça mostra "pendente" e o teste dela não sai na mesa.
+- **Erros** (o áudio ASIO **não inicia** até corrigir; a lista mostra a mensagem):
+  - **entrada repetida**: duas peças lendo a mesma entrada USB;
+  - **saída repetida**: duas peças escrevendo na mesma saída USB;
+  - **canal reservado**: por exemplo entrada USB 1 ou 2 (OBS MixBus 13/14);
+  - **fora da faixa**: canal fora de 1..32 (ou além dos canais que o driver informa).
+- Entrada e saída são validadas **por direção**: entrada USB 1 e saída USB 1 não conflitam.
+- O host ASIO abre o driver **uma vez** com todos os canais das peças roteadas; peças pendentes ficam de fora.
+
+### Configuração da versão 1
+
+Ao abrir, um `settings.json` da v1 é migrado automaticamente: driver, sample e ajustes do bumbo e a rota do bumbo
+no perfil Igreja são mantidos; caixa, tom e surdo ficam nos padrões (rotas pendentes). O arquivo original é
+copiado para `settings.v1.json` na mesma pasta. Um arquivo corrompido vira padrões (com aviso) e é copiado para
+`settings.invalido.json`.
 
 ## Primeiro ensaio na igreja (checklist)
 
@@ -109,15 +176,16 @@ Use a **cena de teste** da X32. O OBS fica aberto e capturando normalmente, com 
 DESLIGADA**. Leve a build self-contained e anote tudo que aparecer na linha "Buffer/latência" do app.
 
 1. **Sample chega só no Aux 1**
-   - Abra o app, escolha o driver ASIO do X-USB, confira "Entrada USB 3 (índice ASIO 2)" e
-     "Saída USB 1 (índice ASIO 0)".
-   - Carregue o WAV do sample (**Escolher WAV...**), clique **Iniciar áudio** e depois **Testar sample**.
+   - Abra o app, escolha o driver ASIO do X-USB e o perfil **Igreja**. A lista de validação deve mostrar só
+     avisos de "pendente" (caixa/tom/surdo); a faixa do Bumbo mostra "Entrada USB 3 (índice ASIO 2) → Saída USB 1
+     (índice ASIO 0)".
+   - Escolha o WAV do bumbo, clique **Iniciar áudio** e depois **Testar** na faixa do Bumbo.
    - Confirme que o sample aparece **só no Aux 1** (medidores da mesa) e em nenhum outro canal ou bus.
 2. **OBS continua igual**
    - Com o app rodando, confirme que o áudio dos buses 13/14 continua chegando ao OBS **sem mudança**
      (nível, sem cortes, sem atraso novo, sem o sample no OBS a menos que a equipe o mande para lá).
 3. **Disparo automático**
-   - Clique **Ativar disparo** e peça ao baterista para tocar suave e forte, golpes isolados e duplas rápidas.
+   - Clique **Ativar kit** e peça ao baterista para tocar suave e forte, golpes isolados e duplas rápidas.
    - Verifique: nenhum golpe duplo, nenhum golpe perdido, nenhum estalo/dropout, nada mudou no OBS.
      Ajuste o limiar (e, se preciso, o grupo **Avançado**) até ficar estável.
    - **Meça o atraso** entre o CH 21 e o Aux 1: grave os dois em duas faixas de uma gravação local
@@ -132,27 +200,31 @@ DESLIGADA**. Leve a build self-contained e anote tudo que aparecer na linha "Buf
      ```
 
      Anote o atraso medido junto com o buffer ASIO e a latência do driver mostrados na linha de status.
-4. **Gravar o bumbo cru para calibração**
+4. **Gravar as peças cruas para calibração**
    - Grave alguns minutos da entrada USB 3 (bumbo cru, suave e forte, com a banda tocando para ter o
-     vazamento real). Esse arquivo calibra o limiar, a faixa de velocity e o intervalo mínimo no modo offline
-     (`--mic bumbo.wav`), sem precisar da mesa.
+     vazamento real) e, se já houver envio, dos microfones da caixa, do tom e do surdo. Esses arquivos calibram
+     limiar, faixa de velocidade e intervalo mínimo de cada peça no modo offline (`--mic arquivo.wav`), sem a mesa.
+5. **Caixa, tom e surdo** (quando a equipe definir os envios/retornos na mesa)
+   - Preencha as rotas em **Editar rotas...** (perfil Igreja), confira a lista de validação (sem erros) e repita
+     os passos 1-3 para cada peça, confirmando que cada sample chega **só** no retorno daquela peça.
 
 ## Depende do ensaio presencial
 
 Ainda não confirmado (sem hardware até agora):
 
 - Versão do driver ASIO do X-USB e o formato nativo das amostras (esperado `Int32LSB`; o app aceita também
-  `Float32LSB`, `Int16LSB` e `Int24LSB`).
+  `Float32LSB`, `Int16LSB` e `Int24LSB`, com um formato único por lado).
 - Tipo de fonte de áudio usada no OBS (ASIO, WASAPI/WDM) e se o driver X-USB aceita o app e o OBS ao mesmo
   tempo (driver compartilhado).
 - Latência real ida e volta (buffer configurado no painel do driver + conversões + janela de disparo
   `max(DetectTimeMs, ScanMs)`, 2 ms por padrão; ajustável em **Avançado → Janela de velocidade**).
-- Níveis reais do bumbo e do vazamento, e portanto os padrões finais de limiar, velocity, intervalo mínimo e
-  redisparo.
+- Níveis reais de cada peça e do vazamento entre microfones, e portanto os padrões finais de limiar, velocidade,
+  intervalo mínimo e redisparo de cada peça.
+- Envios e retornos USB da caixa, do tom e do surdo na mesa (hoje "pendentes").
 
 ## Documentação
 
-- [docs/README-dev.md](docs/README-dev.md) — detector, padrões, modo offline e testes.
+- [docs/README-dev.md](docs/README-dev.md) — detector, padrões por peça, modo offline e testes.
 - [docs/asio-naudio.md](docs/asio-naudio.md) — ASIO com NAudio, threads, formatos e índices.
 - [docs/research/lsp-trigger.md](docs/research/lsp-trigger.md) — pesquisa sobre o LSP Trigger (referência
   de comportamento; nenhum código do LSP, que é LGPL-3, foi copiado).

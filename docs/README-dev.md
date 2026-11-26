@@ -222,6 +222,33 @@ A latência total ao vivo = latência de entrada ASIO + `max(DetectTimeMs, ScanM
   picos de um sustain de 50 Hz e cada ciclo parece um golpe novo (há um teste documentando isso).
   Mantenha o release ≥ 1 período da fundamental (20 ms cobre 50 Hz).
 
+## v2: kit de quatro peças (`SampleDrum.Core.Kit`)
+
+- `KitEngine` (`IMultiChannelProcessor`): quatro `TriggerPipeline` independentes (o mesmo núcleo do
+  `TriggerEngine` da v1: detector, vozes, teste manual, medidor), sem estado mutável compartilhado; a única coisa
+  comum é a fila de eventos (`KitEvent(Piece, TriggerEvent)`), escrita só pela thread de áudio. `Process` não
+  aloca (teste com as quatro peças, testes manuais e trocas de kit).
+- `ApplyKit(PreparedKit)`: uma troca de referência aplicada no início do bloco seguinte, para as quatro peças
+  ao mesmo tempo (nenhum bloco mistura dois kits; há teste concorrente). Vozes já disparadas terminam com o
+  sample antigo. Ganho/detecção opcionais do preset entram na mesma troca.
+- `SampleLibrary`: lista WAVs (só cabeçalho) e prepara kits fora da thread de áudio; qualquer erro por peça →
+  sem kit (o ativo continua). A troca de uma peça só usa `PreparePieceAsync` (kit atual sem ganhos/ajustes +
+  a peça nova), para não desfazer ganhos/ajustes que o operador mudou depois do preset.
+- `RoutingValidator` (por direção), `RoutingProfiles.Church/Simulation`, `ResolvedRouting` (peça → índices
+  ASIO) e `AppConfig` v2 (migração da v1, presets, perfis editáveis).
+
+### Padrões por peça (`KitDefaults`)
+
+Derivados das regras da pesquisa (release do envelope maior que um período da fundamental; limiar ≥ ~10 dB acima
+do vazamento; passa-altas abaixo da fundamental da peça). Todos precisam de calibração com gravação real.
+
+| Peça | Limiar / rearme | Passa-altas | Release do envelope / rearme | Intervalo mínimo | Outros | Por quê |
+|---|---|---|---|---|---|---|
+| Bumbo | −24 / −30 dBFS | 40 Hz | 20 ms / 15 ms | 35 ms | — | padrões da v1 |
+| Caixa | −20 / −26 dBFS | 100 Hz | 10 ms / 10 ms | 25 ms | faixa de velocidade 30 dB | fundamental 180-250 Hz (período 4-5,5 ms); muito vazamento de bumbo e chimbal; rulos e flams rápidos; ghost notes |
+| Tom | −20 / −26 dBFS | 60 Hz | 15 ms / 15 ms | 30 ms | — | fundamental 100-150 Hz (7-10 ms); microfone ouve o kit inteiro e o tom toca pouco |
+| Surdo | −22 / −28 dBFS | 50 Hz | 20 ms / 15 ms | 30 ms | — | fundamental 70-100 Hz (10-14 ms), perto do bumbo; vazamento forte entre os dois |
+
 ## Contrato com o app (thread de áudio)
 
 - `TriggerEngine.Process(input, output)`: thread de áudio; não aloca, não trava, não faz log/IO. `output`
