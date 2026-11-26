@@ -1,12 +1,15 @@
 using NAudio.Wave;
 using NAudio.Wave.Asio;
 using SampleDrum.Core;
+using SampleDrum.Core.Kit;
 
 namespace SampleDrum.App.Audio;
 
 /// <summary>
-/// ASIO duplex host (NAudio 3.3.0 <see cref="AsioDevice.InitDuplex"/>): one input channel in, one output channel out,
-/// same buffer-switch callback. Never changes the driver's sample rate or buffer size (the OBS shares the X-USB driver).
+/// ASIO duplex host (NAudio 3.3.0 <see cref="AsioDevice.InitDuplex"/>) for the whole kit: the driver is opened ONCE
+/// with every routed piece's input and output channel, all served by the same buffer-switch callback. Pieces without a
+/// complete, valid route are not opened: they get silent inputs and their returns are discarded.
+/// Never changes the driver's sample rate or buffer size (the OBS shares the X-USB driver).
 /// Must be created/started/stopped on the UI (STA) thread: ASIO drivers are COM objects.
 /// See docs/asio-naudio.md for the confirmed API.
 /// </summary>
@@ -15,27 +18,27 @@ public sealed class AsioDuplexHost : IAudioHost
     public const int RequiredSampleRate = 48000;
 
     private readonly string _driverName;
-    private readonly int _inputApiIndex;
-    private readonly int _outputApiIndex;
-    private readonly IBlockProcessor _processor;
+    private readonly ResolvedRouting _routing;
+    private readonly IMultiChannelProcessor _processor;
 
     private AsioDevice? _device;
     private bool _stopRequested;
     private SynchronizationContext? _ownerContext;
 
     // Audio-thread state: allocated in Start(), only read/written by the callback afterwards.
-    private float[] _inBuffer = [];
-    private float[] _outBuffer = [];
+    private float[][] _inputs = [];
+    private float[][] _outputs = [];
+    private int[] _routedPieces = [];          // channel position k -> piece index
     private AsioSampleType _inFormat;
     private AsioSampleType _outFormat;
     private int _outBytesPerSample;
+    private int _capacity;
     private long _callbackCount;
 
-    public AsioDuplexHost(string driverName, int inputApiIndex, int outputApiIndex, IBlockProcessor processor)
+    public AsioDuplexHost(string driverName, ResolvedRouting routing, IMultiChannelProcessor processor)
     {
         _driverName = driverName ?? throw new ArgumentNullException(nameof(driverName));
-        _inputApiIndex = inputApiIndex;
-        _outputApiIndex = outputApiIndex;
+        _routing = routing ?? throw new ArgumentNullException(nameof(routing));
         _processor = processor ?? throw new ArgumentNullException(nameof(processor));
     }
 
@@ -48,12 +51,35 @@ public sealed class AsioDuplexHost : IAudioHost
     public int SampleRate { get; private set; } = RequiredSampleRate;
     public int InputLatencySamples { get; private set; }
     public int OutputLatencySamples { get; private set; }
+    public IMultiChannelProcessor Processor => _processor;
+    public ResolvedRouting Routing => _routing;
 
     /// <summary>Installed ASIO driver names (registry HKLM\SOFTWARE\ASIO). Never throws.</summary>
     public static string[] GetDriverNames()
     {
         try { return AsioDevice.GetDriverNames(); }
         catch { return []; }
+    }
+
+    /// <summary>
+    /// Input/output channel counts of a driver (opens and closes it; UI thread). Null when it cannot be opened.
+    /// Used to validate the routing against what the driver really exposes before starting.
+    /// </summary>
+    public static (int Inputs, int Outputs)? TryGetChannelCounts(string driverName, IAudioHost? runningHost, out string? error)
+    {
+        error = null;
+        try
+        {
+            if (runningHost is AsioDuplexHost h && h._device is not null && h._driverName == driverName)
+                return (h._device.Capabilities.NbInputChannels, h._device.Capabilities.NbOutputChannels);
+            using var device = OpenDevice(driverName);
+            return (device.Capabilities.NbInputChannels, device.Capabilities.NbOutputChannels);
+        }
+        catch (AudioHostException ex)
+        {
+            error = ex.Message;
+            return null;
+        }
     }
 
     private static string DriverListText()
@@ -103,6 +129,9 @@ public sealed class AsioDuplexHost : IAudioHost
         if (IsRunning) return;
         DisposeDevice();
         _stopRequested = false;
+        if (_routing.RoutedPieces.Count == 0)
+            throw new AudioHostException(
+                $"Nenhuma peça tem entrada e saída definidas no perfil \"{_routing.ProfileName}\": nada para abrir no ASIO.");
         // Start() runs on the UI thread; device events are funnelled back to it (see OnDeviceStopped).
         _ownerContext = SynchronizationContext.Current;
 
@@ -139,21 +168,10 @@ public sealed class AsioDuplexHost : IAudioHost
     private void Configure(AsioDevice device)
     {
         var caps = device.Capabilities;
-        int inDesk = _inputApiIndex + 1, outDesk = _outputApiIndex + 1;
-
         if (caps.NbInputChannels == 0 || caps.NbOutputChannels == 0)
             throw new AudioHostException(
                 $"O driver \"{_driverName}\" informa {caps.NbInputChannels} entradas e {caps.NbOutputChannels} saídas. " +
                 "O X-USB provavelmente está desconectado ou a mesa está desligada.");
-
-        if (_inputApiIndex < 0 || _inputApiIndex >= caps.NbInputChannels)
-            throw new AudioHostException(
-                $"Entrada USB {inDesk} (índice ASIO {_inputApiIndex}) não existe: o driver \"{_driverName}\" tem " +
-                $"{caps.NbInputChannels} entradas (USB 1..{caps.NbInputChannels}).");
-        if (_outputApiIndex < 0 || _outputApiIndex >= caps.NbOutputChannels)
-            throw new AudioHostException(
-                $"Saída USB {outDesk} (índice ASIO {_outputApiIndex}) não existe: o driver \"{_driverName}\" tem " +
-                $"{caps.NbOutputChannels} saídas (USB 1..{caps.NbOutputChannels}).");
 
         // Sample rate: refuse, never change it (OBS shares the driver).
         int rate = device.CurrentSampleRate;
@@ -163,24 +181,35 @@ public sealed class AsioDuplexHost : IAudioHost
                 "O SampleDrum não altera a taxa do driver (o OBS usa o mesmo X-USB): ajuste a taxa na mesa/X-USB " +
                 "e inicie de novo.");
 
-        _inFormat = caps.InputChannelInfos[_inputApiIndex].type;
-        _outFormat = caps.OutputChannelInfos[_outputApiIndex].type;
-        if (!NativeSampleConverter.IsSupported(_inFormat))
-            throw new AudioHostException(
-                $"Formato nativo {_inFormat} da entrada USB {inDesk} não é suportado " +
-                "(suportados: Int32LSB, Float32LSB, Int16LSB, Int24LSB).");
-        if (!NativeSampleConverter.IsSupported(_outFormat))
-            throw new AudioHostException(
-                $"Formato nativo {_outFormat} da saída USB {outDesk} não é suportado " +
-                "(suportados: Int32LSB, Float32LSB, Int16LSB, Int24LSB).");
+        var pieces = _routing.RoutedPieces;
+        var ins = pieces.Select(p => _routing.InputIndex(p)!.Value).ToArray();
+        var outs = pieces.Select(p => _routing.OutputIndex(p)!.Value).ToArray();
+        if (ins.Distinct().Count() != ins.Length || outs.Distinct().Count() != outs.Length)
+            throw new AudioHostException("Roteamento inválido: duas peças no mesmo canal (corrija o perfil).");
+
+        for (int k = 0; k < pieces.Count; k++)
+        {
+            var p = pieces[k];
+            if (ins[k] >= caps.NbInputChannels)
+                throw new AudioHostException(
+                    $"{p.Label()}: entrada USB {ins[k] + 1} (índice ASIO {ins[k]}) não existe: o driver \"{_driverName}\" " +
+                    $"tem {caps.NbInputChannels} entradas (USB 1..{caps.NbInputChannels}).");
+            if (outs[k] >= caps.NbOutputChannels)
+                throw new AudioHostException(
+                    $"{p.Label()}: saída USB {outs[k] + 1} (índice ASIO {outs[k]}) não existe: o driver \"{_driverName}\" " +
+                    $"tem {caps.NbOutputChannels} saídas (USB 1..{caps.NbOutputChannels}).");
+        }
+
+        _inFormat = SingleFormat(ins.Select(i => caps.InputChannelInfos[i].type), "entradas");
+        _outFormat = SingleFormat(outs.Select(o => caps.OutputChannelInfos[o].type), "saídas");
         _outBytesPerSample = NativeSampleConverter.BytesPerSample(_outFormat);
 
         try
         {
             device.InitDuplex(new AsioDuplexOptions
             {
-                InputChannels = [_inputApiIndex],
-                OutputChannels = [_outputApiIndex],
+                InputChannels = ins,
+                OutputChannels = outs,
                 SampleRate = null,   // null = keep the driver's current rate; NAudio then never calls SetSampleRate
                 BufferSize = null,   // null = driver's preferred buffer size (unchanged)
                 Processor = OnProcess,
@@ -191,44 +220,63 @@ public sealed class AsioDuplexHost : IAudioHost
             throw new AudioHostException($"Falha ao configurar o driver \"{_driverName}\" em duplex: {ex.Message}", ex);
         }
 
-        // Allocate the callback buffers once, at start (generous margin in case a driver hands a bigger block).
+        // Allocate the callback buffers once (generous margin in case a driver hands a bigger block). Unrouted pieces'
+        // input arrays are never written, so they stay silent.
         FramesPerBuffer = device.FramesPerBuffer;
         SampleRate = rate;
-        int capacity = Math.Max(FramesPerBuffer, caps.BufferMaxSize);
-        _inBuffer = new float[capacity];
-        _outBuffer = new float[capacity];
+        _capacity = Math.Max(FramesPerBuffer, caps.BufferMaxSize);
+        _inputs = DrumPieces.All.Select(_ => new float[_capacity]).ToArray();
+        _outputs = DrumPieces.All.Select(_ => new float[_capacity]).ToArray();
+        _routedPieces = pieces.Select(p => (int)p).ToArray();
         Volatile.Write(ref _callbackCount, 0);
         InputLatencySamples = device.InputLatencySamples;
         OutputLatencySamples = device.OutputLatencySamples;
 
-        string inName = caps.InputChannelInfos[_inputApiIndex].name;
-        string outName = caps.OutputChannelInfos[_outputApiIndex].name;
+        var routes = pieces.Select((p, k) =>
+            $"{p.Label()}: entrada USB {ins[k] + 1} \"{caps.InputChannelInfos[ins[k]].name}\" → " +
+            $"saída USB {outs[k] + 1} \"{caps.OutputChannelInfos[outs[k]].name}\"");
+        var skipped = DrumPieces.All.Where(p => !_routing.IsRouted(p)).Select(p => p.Label()).ToArray();
         Description =
-            $"ASIO \"{_driverName}\" {rate} Hz, buffer {FramesPerBuffer} amostras " +
-            $"({FramesPerBuffer * 1000.0 / rate:0.0} ms); entrada USB {inDesk} \"{inName}\" ({_inFormat}), " +
-            $"saída USB {outDesk} \"{outName}\" ({_outFormat}); latência do driver: entrada {InputLatencySamples}, " +
-            $"saída {OutputLatencySamples} amostras";
+            $"ASIO \"{_driverName}\" {rate} Hz, buffer {FramesPerBuffer} amostras ({FramesPerBuffer * 1000.0 / rate:0.0} ms), " +
+            $"formato {_inFormat}/{_outFormat}; {string.Join("; ", routes)}" +
+            (skipped.Length > 0 ? $"; sem rota (não abertas): {string.Join(", ", skipped)}" : "") +
+            $"; latência do driver: entrada {InputLatencySamples}, saída {OutputLatencySamples} amostras";
     }
 
-    /// <summary>
-    /// ASIO real-time thread. No allocations, locks, logging, I/O or UI calls.
-    /// </summary>
+    private AsioSampleType SingleFormat(IEnumerable<AsioSampleType> types, string side)
+    {
+        var distinct = types.Distinct().ToArray();
+        if (distinct.Length != 1)
+            throw new AudioHostException(
+                $"As {side} escolhidas usam formatos nativos diferentes ({string.Join(", ", distinct)}); " +
+                "o NAudio exige um formato único por lado.");
+        if (!NativeSampleConverter.IsSupported(distinct[0]))
+            throw new AudioHostException(
+                $"Formato nativo {distinct[0]} das {side} não é suportado (suportados: Int32LSB, Float32LSB, Int16LSB, Int24LSB).");
+        return distinct[0];
+    }
+
+    /// <summary>ASIO real-time thread. No allocations, locks, logging, I/O or UI calls.</summary>
     private void OnProcess(in AsioProcessBuffers buffers)
     {
         int frames = buffers.Frames;
-        int n = frames <= _inBuffer.Length ? frames : _inBuffer.Length;
-        var input = _inBuffer.AsSpan(0, n);
-        var output = _outBuffer.AsSpan(0, n);
+        int n = frames <= _capacity ? frames : _capacity;
+        var routed = _routedPieces;
 
-        NativeSampleConverter.ToFloat(buffers.RawInput(0).Bytes, _inFormat, input);
-        output.Clear();
-        _processor.Process(input, output);
+        for (int k = 0; k < routed.Length; k++)
+            NativeSampleConverter.ToFloat(buffers.RawInput(k).Bytes, _inFormat, _inputs[routed[k]].AsSpan(0, n));
+        for (int p = 0; p < _outputs.Length; p++) _outputs[p].AsSpan(0, n).Clear();
+
+        _processor.Process(_inputs, _outputs, n);
 
         // Writing through RawOutput makes NAudio skip its own float->native conversion for this channel,
         // so every frame of the native buffer must be written here.
-        var rawOut = buffers.RawOutput(0).Bytes;
-        NativeSampleConverter.FromFloat(output, _outFormat, rawOut);
-        if (n < frames) rawOut.Slice(n * _outBytesPerSample).Clear();
+        for (int k = 0; k < routed.Length; k++)
+        {
+            var rawOut = buffers.RawOutput(k).Bytes;
+            NativeSampleConverter.FromFloat(_outputs[routed[k]].AsSpan(0, n), _outFormat, rawOut);
+            if (n < frames) rawOut.Slice(n * _outBytesPerSample).Clear();
+        }
 
         Volatile.Write(ref _callbackCount, _callbackCount + 1);
     }
@@ -287,6 +335,7 @@ public sealed class AsioDuplexHost : IAudioHost
         else ThreadPool.QueueUserWorkItem(_ => action()); // headless: still off the ASIO callback thread
     }
 
+    /// <summary>Stops; NAudio's Dispose waits for a running callback to finish, so the processor may be reset after.</summary>
     public void Stop()
     {
         _stopRequested = true;
