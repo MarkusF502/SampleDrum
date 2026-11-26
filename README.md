@@ -76,6 +76,9 @@ Detalhes do detector, dos padrões e dos testes: [docs/README-dev.md](docs/READM
 ### App
 
 ```powershell
+# acentos certos na saída: o Windows PowerShell 5.1 lê a saída com a página de código OEM (850)
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+
 # rodar a interface
 dotnet run -c Release --project src/SampleDrum.App
 

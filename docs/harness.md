@@ -19,17 +19,20 @@ O mesmo cenário também roda no console multiplataforma: `SampleDrum.Offline --
 ### A partir do código-fonte (SDK .NET 10)
 
 ```powershell
+# acentos certos na saída: o Windows PowerShell 5.1 lê a saída com a página de código OEM (850)
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+
 dotnet build SampleDrum.sln -c Release
 dotnet test SampleDrum.sln -c Release --no-build
 
 # verificações automáticas
-src\SampleDrum.App\bin\Release\net10.0-windows\SampleDrum.App.exe --selftest
+src\SampleDrum.App\bin\Release\net10.0-windows\SampleDrum.App.exe --selftest | Out-Host; $LASTEXITCODE
 
 # cenário de teste (offline) + rodada em tempo real; relatórios em C:\temp\sd-teste
-src\SampleDrum.App\bin\Release\net10.0-windows\SampleDrum.App.exe --harness C:\temp\sd-teste --realtime
+src\SampleDrum.App\bin\Release\net10.0-windows\SampleDrum.App.exe --harness C:\temp\sd-teste --realtime | Out-Host; $LASTEXITCODE
 
 # o mesmo, ouvindo a prévia no fone/caixas do PC
-src\SampleDrum.App\bin\Release\net10.0-windows\SampleDrum.App.exe --harness C:\temp\sd-teste --play
+src\SampleDrum.App\bin\Release\net10.0-windows\SampleDrum.App.exe --harness C:\temp\sd-teste --play | Out-Host; $LASTEXITCODE
 
 # console multiplataforma (também roda no WSL/Linux), bloco de 480 e outra semente
 dotnet run --project src\SampleDrum.Offline -c Release -- --kit C:\temp\sd-offline --block 480 --seed 7
@@ -39,6 +42,9 @@ No PowerShell, o `SampleDrum.App.exe` é um programa de janela (WinExe) e o Powe
 a saída e o código de saída, **sempre** termine o comando com um pipe:
 
 ```powershell
+# acentos certos na saída: o Windows PowerShell 5.1 lê a saída com a página de código OEM (850)
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+
 .\SampleDrum.App.exe --harness C:\temp\sd-teste | Out-Host; $LASTEXITCODE
 
 # para guardar a saída num arquivo
@@ -59,6 +65,8 @@ dotnet publish src\SampleDrum.App -c Release -r win-x64 --self-contained -o C:\t
 A pasta tem ~120 MB e roda sozinha em qualquer Windows 10/11 x64:
 
 ```powershell
+# acentos certos na saída: o Windows PowerShell 5.1 lê a saída com a página de código OEM (850)
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
 cd C:\temp\SampleDrum-publicado
 .\SampleDrum.App.exe --selftest | Out-Host
 .\SampleDrum.App.exe --harness C:\temp\sd-teste --play | Out-Host
@@ -207,21 +215,23 @@ Pacote `NAudio.WinMM` **3.3.0** (MIT), conferido no XML do pacote e no código-f
   consumidor); a thread do `WaveOut` lê dele. Se faltar dado, toca silêncio e conta um underrun; se o anel encher,
   o bloco novo é descartado e conta um overrun. O motor nunca espera pela placa de som.
 
-## Verificações executadas (branch `ao/asio-app/root`, Release, neste PC sem X32 e sem ASIO)
+## Verificações executadas (Release, neste PC sem X32 e sem ASIO)
 
-Última rodada em 26/11/2026, depois das correções da revisão (atribuição de saída por reconstrução, golpes
-suaves do surdo, ordem dos eventos); as linhas marcadas "25/11" não foram repetidas nesta rodada.
+Última rodada em 26/11/2026 na branch integrada `ao/sampledrum-core/root` (harness + multicanal + API do painel,
+depois das correções das revisões); as linhas marcadas "25/11" não foram repetidas nesta rodada.
 
 | Verificação | Resultado |
 |---|---|
 | `dotnet build SampleDrum.sln -c Release` | 0 avisos, 0 erros |
-| `dotnet test SampleDrum.sln -c Release` (3 vezes, a última depois das correções de mensagens) | 263 testes no total. App (Windows): 7/7. Core: 252/256 — os 21 `HarnessTests` passam; falham as 4 sementes de `KitEngineTests.DefaultKit_PassesSyntheticScenario_KickBleedDoesNotFireFloorTom` (arquivo do worker multicanal), que confere todo o gabarito com tolerância fixa de ±2 ms e ainda não usa a tolerância de 8 ms dos golpes do surdo perto do limiar (correção de 1 linha pedida) |
-| `SampleDrum.App.exe --selftest` | 11/11 OK em ~8–9 s, código 0 |
+| `dotnet test SampleDrum.sln -c Release` (2 vezes) | 324 testes, todos passam: Core 317/317 (inclui os `HarnessTests` e `KitEngineTests.DefaultKit_PassesSyntheticScenario_KickBleedDoesNotFireFloorTom`, que agora usa a tolerância de 8 ms dos golpes suaves do surdo); App (Windows) 7/7 |
+| `SampleDrum.App.exe --selftest` | 11/11 OK, código 0 |
+| Windows PowerShell 5.1 com `[Console]::OutputEncoding = [Text.Encoding]::UTF8` e `--selftest \| Out-File x.txt; Get-Content x.txt; $LASTEXITCODE` | acentos corretos ("Conversão"), código 0 |
+| `SampleDrum.App.exe --simulation` sem `settings.json` | abre e fecha sem erro; nenhum `%AppData%\SampleDrum\settings.json` criado |
 | Windows PowerShell 5.1: `--selftest \| Out-File x.txt; Get-Content x.txt; $LASTEXITCODE` e `--harness --help \| Out-Host` | saída completa no arquivo/console, código 0 |
 | `SampleDrum.Offline --mic C:\nao\existe.wav` e `--kit <pasta> --mics a.wav b.wav c.wav d.wav` (arquivos inexistentes) | "Erro: arquivo não encontrado: …" em português; códigos 1 e 2 |
 | `SampleDrum.Offline --generate-synthetic <pasta>` | exemplo impresso com `dotnet run --project src/SampleDrum.Offline -c Release -- …` |
-| `--harness <pasta>` com bloco 64, 128, 256 e 480 | OK nos quatro, código 0 |
-| `--harness <pasta> --realtime` (tempo real 1×) | offline OK e tempo real OK, disparos idênticos ao offline |
+| `--harness <pasta>` com bloco 64, 128, 256 e 480 | OK nos quatro (4/4 peças OK em cada), código 0 |
+| `--harness <pasta> --realtime` (tempo real 1×) | offline OK e tempo real OK, código 0 |
 | cenário em 7 sementes (1, 2, 3, 4, 5, 7, 11) × blocos 64/128/256/480, avaliador novo | 28/28 OK (nenhum alarme falso da nova verificação de saída) |
 | `--harness <pasta> --play` (25/11) | OK; saída padrão aberta, 0 underruns, 0 descartes (o áudio não foi escutado por quem rodou) |
 | (25/11) `--harness --mics a b c d` e `--mics4 mics-4ch.wav --block 64` | rodaram até o fim (sem gabarito), código 0 |

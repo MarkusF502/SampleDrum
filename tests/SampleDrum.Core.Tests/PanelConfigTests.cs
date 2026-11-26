@@ -127,6 +127,41 @@ public sealed class PanelConfigTests : IDisposable
     }
 
     [Fact]
+    public void SimulationRun_DoesNotCreateMissingFile()
+    {
+        string path = Path.Combine(_dir, "nao-existe", "settings.json");
+        var cfg = AppConfig.CreateDefault();
+        cfg.ActiveProfileName = RoutingProfiles.SimulationName;
+        Assert.False(cfg.SaveSimulationRun(path, true, RoutingProfiles.ChurchName, null));
+        Assert.False(File.Exists(path));
+        Assert.False(Directory.Exists(Path.GetDirectoryName(path)));
+    }
+
+    [Fact]
+    public void SimulationRun_ExistingFile_KeepsOperatorChoices_LiveConfigUntouched()
+    {
+        string path = Path.Combine(_dir, "settings.json");
+        var saved = AppConfig.CreateDefault();
+        saved.UseSimulation = false;
+        saved.DriverName = "X-USB ASIO Driver";
+        saved.Save(path);
+
+        var runtime = AppConfig.Load(path, out _);
+        runtime.UseSimulation = true;                                 // what --simulation sets at runtime
+        runtime.ActiveProfileName = RoutingProfiles.SimulationName;
+        runtime[DrumPiece.Tom].Enabled = false;                       // a real change made during the run
+        Assert.True(runtime.SaveSimulationRun(path, saved.UseSimulation, saved.ActiveProfileName, saved.DriverName));
+
+        var back = AppConfig.Load(path, out _);
+        Assert.False(back.UseSimulation);
+        Assert.Equal(RoutingProfiles.ChurchName, back.ActiveProfileName);
+        Assert.Equal("X-USB ASIO Driver", back.DriverName);
+        Assert.False(back[DrumPiece.Tom].Enabled);
+        Assert.Equal(RoutingProfiles.SimulationName, runtime.ActiveProfileName); // live config not mutated
+        Assert.True(runtime.UseSimulation);
+    }
+
+    [Fact]
     public async Task PreparePieceAsync_ClearsPresetId_CustomSelection()
     {
         string samples = Path.Combine(_dir, "samples");

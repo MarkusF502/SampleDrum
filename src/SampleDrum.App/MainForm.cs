@@ -56,6 +56,7 @@ public sealed class MainForm : Form
     {
         Multiline = true, ReadOnly = true, ScrollBars = ScrollBars.Vertical, Dock = DockStyle.Fill,
         Font = new Font(FontFamily.GenericMonospace, 9f), BackColor = SystemColors.Window,
+        AccessibleName = "Registro",   // own name for screen readers (otherwise borrowed from a nearby label)
     };
     private readonly System.Windows.Forms.Timer _uiTimer = new() { Interval = 33 };
 
@@ -840,13 +841,9 @@ public sealed class MainForm : Form
         {
             if (StartupOptions.SimulationMode)
             {
-                // A --simulation run never changes what the operator chose for normal runs: save a detached copy with
-                // the persisted driver/profile/simulation flag (the live config is never mutated for this).
-                var copy = AppConfig.Parse(_cfg.ToJson(), out _);
-                copy.UseSimulation = _savedUseSimulation;
-                copy.ActiveProfileName = _savedProfileName;
-                copy.DriverName = _savedDriverName;
-                copy.Save();
+                // A --simulation run never changes what the operator chose for normal runs, and never creates the
+                // settings file when it does not exist yet (see AppConfig.SaveSimulationRun).
+                _cfg.SaveSimulationRun(AppConfig.DefaultFilePath, _savedUseSimulation, _savedProfileName, _savedDriverName);
             }
             else
             {

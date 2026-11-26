@@ -438,6 +438,23 @@ public sealed class AppConfig
 
     public void Save() => Save(DefaultFilePath);
 
+    /// <summary>
+    /// Saves a <c>--simulation</c> run. If <paramref name="path"/> does not exist yet nothing is written (a test run
+    /// must not create the operator's configuration). Otherwise writes a detached copy of this config with the
+    /// operator's persisted driver, profile and simulation flag; this instance is never modified.
+    /// Returns true when the file was written.
+    /// </summary>
+    public bool SaveSimulationRun(string path, bool persistedUseSimulation, string persistedProfileName, string? persistedDriverName)
+    {
+        if (!File.Exists(path)) return false;
+        var copy = Parse(ToJson(), out _);
+        copy.UseSimulation = persistedUseSimulation;
+        copy.ActiveProfileName = persistedProfileName;
+        copy.DriverName = persistedDriverName;
+        copy.Save(path);
+        return true;
+    }
+
     /// <summary>Writes atomically (temp file + move).</summary>
     public void Save(string path)
     {
