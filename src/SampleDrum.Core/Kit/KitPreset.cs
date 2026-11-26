@@ -33,14 +33,62 @@ public sealed record KitPreset
     public string ToJson() => JsonSerializer.Serialize(this, JsonOptions);
 
     /// <summary>Parses a preset; throws <see cref="InvalidDataException"/> with a pt-BR message when invalid.</summary>
-    public static KitPreset FromJson(string json) => throw new NotImplementedException();
+    public static KitPreset FromJson(string json)
+    {
+        KitPreset? preset;
+        try { preset = JsonSerializer.Deserialize<KitPreset>(json, JsonOptions); }
+        catch (JsonException ex) { throw new InvalidDataException($"Preset inválido: {ex.Message}", ex); }
+        if (preset is null) throw new InvalidDataException("Preset vazio.");
+        if (preset.PresetVersion > CurrentVersion)
+            throw new InvalidDataException($"Preset de versão {preset.PresetVersion}; este programa lê até a versão {CurrentVersion}.");
+        foreach (var key in preset.Pieces.Keys)
+            if (!key.IsValid()) throw new InvalidDataException($"Peça inválida no preset: {key}.");
+        return preset with { Pieces = new Dictionary<DrumPiece, PiecePreset>(preset.Pieces) };
+    }
 
-    public static KitPreset Load(string path) => throw new NotImplementedException();
+    /// <summary>Loads a preset file; an empty name falls back to the file name.</summary>
+    public static KitPreset Load(string path)
+    {
+        var preset = FromJson(File.ReadAllText(path));
+        return string.IsNullOrWhiteSpace(preset.Name) ? preset with { Name = Path.GetFileNameWithoutExtension(path) } : preset;
+    }
 
     /// <summary>Writes the preset atomically (temp file + move).</summary>
-    public void Save(string path) => throw new NotImplementedException();
+    public void Save(string path)
+    {
+        var dir = Path.GetDirectoryName(Path.GetFullPath(path));
+        if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+        string tmp = path + ".tmp";
+        File.WriteAllText(tmp, ToJson());
+        File.Move(tmp, path, overwrite: true);
+    }
 
     /// <summary>Loads every *.json preset in <paramref name="folder"/>; unreadable files are reported, not thrown.</summary>
-    public static IReadOnlyList<KitPreset> LoadFolder(string folder, out IReadOnlyList<string> errors) =>
-        throw new NotImplementedException();
+    public static IReadOnlyList<KitPreset> LoadFolder(string folder, out IReadOnlyList<string> errors)
+    {
+        var list = new List<KitPreset>();
+        var errs = new List<string>();
+        if (Directory.Exists(folder))
+        {
+            foreach (var file in Directory.EnumerateFiles(folder, "*.json").OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
+            {
+                try { list.Add(Load(file)); }
+                catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
+                {
+                    errs.Add($"{Path.GetFileName(file)}: {ex.Message}");
+                }
+            }
+        }
+        errors = errs;
+        return list;
+    }
+
+    /// <summary>File name for a preset name (invalid characters replaced).</summary>
+    public static string FileNameFor(string name)
+    {
+        var invalid = Path.GetInvalidFileNameChars();
+        var clean = new string((string.IsNullOrWhiteSpace(name) ? "preset" : name.Trim())
+            .Select(c => invalid.Contains(c) ? '_' : c).ToArray());
+        return clean + ".json";
+    }
 }
