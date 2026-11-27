@@ -8,7 +8,15 @@ public enum KitOperationStatus { Queued, Preparing, Applied, Failed, Superseded 
 public enum KitOperationKind { PieceSample, Preset, PieceEnabled, PieceGain, KitEnabled, PieceSettings, PreparedKit, LibraryFolder }
 
 public sealed record KitOperationSnapshot(Guid Id, KitOperationKind Kind, DrumPiece? Piece,
-    KitOperationStatus Status, IReadOnlyList<PieceLoadError> Errors, long? ResultVersion);
+    KitOperationStatus Status, IReadOnlyList<PieceLoadError> Errors, long? ResultVersion)
+{
+    /// <summary>
+    /// Kit generation this operation submitted to the engine (<see cref="KitEngine.ApplyKit"/>); null when it did not
+    /// swap the kit (gain, enable, settings, folder) or is not applied. Audio confirmation:
+    /// <see cref="KitEngine.AppliedKitGeneration"/> &gt;= this value.
+    /// </summary>
+    public long? KitGeneration { get; init; }
+}
 
 /// <summary>Thread-safe operation handle; Completion resolves at a terminal status, including failures.</summary>
 public sealed class KitOperation
@@ -20,9 +28,11 @@ public sealed class KitOperation
     public Guid Id => Snapshot.Id;
     public KitOperationSnapshot Snapshot => Volatile.Read(ref _snapshot);
     public Task<KitOperationSnapshot> Completion => _completion.Task;
-    internal void Update(KitOperationStatus status, IReadOnlyList<PieceLoadError>? errors = null, long? version = null)
+    internal void Update(KitOperationStatus status, IReadOnlyList<PieceLoadError>? errors = null, long? version = null,
+        long? kitGeneration = null)
     {
-        var next = Snapshot with { Status = status, Errors = Array.AsReadOnly((errors ?? []).ToArray()), ResultVersion = version };
+        var next = Snapshot with { Status = status, Errors = Array.AsReadOnly((errors ?? []).ToArray()), ResultVersion = version,
+            KitGeneration = kitGeneration };
         Volatile.Write(ref _snapshot, next);
         if (status is KitOperationStatus.Applied or KitOperationStatus.Failed or KitOperationStatus.Superseded)
             _completion.TrySetResult(next);
@@ -30,9 +40,21 @@ public sealed class KitOperation
 }
 
 public sealed record KitPieceSnapshot(DrumPiece Piece, string? SampleId, string? SamplePath, float GainDb,
-    bool Enabled, PieceSettings Settings);
+    bool Enabled, PieceSettings Settings)
+{
+    /// <summary>Version at which this piece's sample last changed (another file, or none). 0 = since start.</summary>
+    public long SampleVersion { get; init; }
+}
 public sealed record KitStateSnapshot(long Version, bool KitEnabled, string? ActivePresetId,
-    IReadOnlyList<KitPieceSnapshot> Pieces);
+    IReadOnlyList<KitPieceSnapshot> Pieces)
+{
+    /// <summary>
+    /// Version at which the kit SELECTION last changed: any piece's sample or <see cref="ActivePresetId"/>. Gain,
+    /// enable and detection changes do not move it. Remote adapters use it (and <see cref="KitPieceSnapshot.SampleVersion"/>)
+    /// to refuse a command based on an older selection.
+    /// </summary>
+    public long KitVersion { get; init; }
+}
 
 /// <summary>
 /// Single command path for PC and remote adapters. Owns engine changes for its lifetime; do not also mutate the
@@ -63,6 +85,7 @@ public sealed class KitController : IAsyncDisposable
     private readonly Task _worker;
     private readonly Func<KitPreset, int, CancellationToken, Task<KitPrepareResult>> _prepare;
     private KitStateSnapshot _snapshot;
+    private PreparedKit? _capturedKit;     // engine kit at the last Capture (sample change detection)
     private bool _disposed;
 
     public KitController(KitEngine engine, SampleLibrary library) : this(engine, library, null) { }
@@ -295,12 +318,13 @@ public sealed class KitController : IAsyncDisposable
                 try
                 {
                     BeforeApply?.Invoke(op.Snapshot);
+                    long? generation = null;
                     if (result?.Kit is { } kit)
                     {
                         // A custom piece selection no longer represents an exact preset.
                         if (op.Snapshot.Kind == KitOperationKind.PieceSample)
                             kit = new PreparedKit(kit.Name, kit.SampleRate, kit.Pieces, null);
-                        _engine.ApplyKit(kit);
+                        generation = _engine.ApplyKit(kit);
                     }
                     var s = op.Snapshot;
                     if (newLibrary is not null) _library = newLibrary;
@@ -314,7 +338,7 @@ public sealed class KitController : IAsyncDisposable
                     if (s.Kind == KitOperationKind.KitEnabled) _engine.KitEnabled = (bool)request.Value!;
                     var snapshot = Capture(Version + 1);
                     Volatile.Write(ref _snapshot, snapshot);
-                    op.Update(KitOperationStatus.Applied, version: snapshot.Version);
+                    op.Update(KitOperationStatus.Applied, version: snapshot.Version, kitGeneration: generation);
                 }
                 catch (Exception ex)
                 {
@@ -339,15 +363,35 @@ public sealed class KitController : IAsyncDisposable
 
     private KitStateSnapshot Capture(long version)
     {
+        var previous = Volatile.Read(ref _snapshot) as KitStateSnapshot;   // null only in the constructor
+        var previousKit = _capturedKit;
         var settings = _engine.Settings;
         var kit = _engine.ActiveKit;
-        return new(version, _engine.KitEnabled, kit?.PresetId, Array.AsReadOnly(DrumPieces.All.Select(p =>
+        bool selectionChanged = previous is not null && previous.ActivePresetId != kit?.PresetId;
+        var pieces = DrumPieces.All.Select(p =>
         {
             var path = kit?[p].SourcePath;
             string? id = path is null ? null : Path.GetRelativePath(_library.Folder, path).Replace('\\', '/');
             if (id is not null && !_library.TryResolveInLibrary(id, out _)) id = null;
-            return new KitPieceSnapshot(p, id, path, settings[p].OutputGainDb, _engine.IsPieceEnabled(p), settings[p]);
-        }).ToArray()));
+            long sampleVersion = previous is null ? version
+                : SameSample(previousKit?[p], kit?[p]) ? previous.Pieces[(int)p].SampleVersion : version;
+            if (previous is not null && sampleVersion == version) selectionChanged = true;
+            return new KitPieceSnapshot(p, id, path, settings[p].OutputGainDb, _engine.IsPieceEnabled(p), settings[p])
+                { SampleVersion = sampleVersion };
+        }).ToArray();
+        _capturedKit = kit;
+        return new(version, _engine.KitEnabled, kit?.PresetId, Array.AsReadOnly(pieces))
+            { KitVersion = previous is null || selectionChanged ? version : previous.KitVersion };
+    }
+
+    /// <summary>Same sample in a piece: same source file (case-insensitive), or the very same buffer when unnamed.</summary>
+    private static bool SameSample(PreparedPiece? a, PreparedPiece? b)
+    {
+        bool aNone = a?.Samples is null, bNone = b?.Samples is null;
+        if (aNone || bNone) return aNone == bNone;
+        if (a!.SourcePath is not null || b!.SourcePath is not null)
+            return string.Equals(a.SourcePath, b!.SourcePath, StringComparison.OrdinalIgnoreCase);
+        return ReferenceEquals(a.Samples, b.Samples);
     }
 
     private void Notify()
