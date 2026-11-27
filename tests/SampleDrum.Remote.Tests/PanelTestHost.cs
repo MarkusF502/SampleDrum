@@ -117,7 +117,7 @@ public sealed class PanelTestHost : IAsyncDisposable
     {
         var http = Server.App!.GetTestServer().CreateClient();
         http.BaseAddress = Base;
-        return new PanelClient(this, http, origin);
+        return new PanelClient(http, origin);
     }
 
     /// <summary>Paired client (cookie set from the pairing response).</summary>
@@ -140,7 +140,7 @@ public sealed class PanelTestHost : IAsyncDisposable
 }
 
 /// <summary>HttpClient wrapper with a manual cookie jar (TestServer has none) and the browser's Origin header.</summary>
-public sealed class PanelClient(PanelTestHost host, HttpClient http, string? origin) : IDisposable
+public sealed class PanelClient(HttpClient http, string? origin) : IDisposable
 {
     public HttpClient Http { get; } = http;
     public string? Cookie { get; set; }

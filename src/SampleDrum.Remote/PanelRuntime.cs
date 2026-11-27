@@ -258,7 +258,6 @@ internal sealed class PanelRuntime : IDisposable
         lock (_commandGate)
         {
             if (Operations.Find(device.Key, clientOpId) is { } existing) return Repeat(existing, fingerprint);
-            if (!_limiter.TryAcquire(device.Key, out var wait)) return RateLimited(ctx, wait);
             if (body.BaseVersion is not { } baseVersion || baseVersion < 0) return MissingBaseVersion();
             var library = Controller.Library;
             if (string.IsNullOrWhiteSpace(body.SampleId) || !library.TryResolveInLibrary(body.SampleId, out var full))
@@ -268,6 +267,7 @@ internal sealed class PanelRuntime : IDisposable
             var snap = Controller.Snapshot;
             if (baseVersion > snap.Version || snap.Pieces[(int)p].SampleVersion > baseVersion)
                 return Stale(device.Name, $"{p.Label()} mudou depois da versão {baseVersion}. Confira e toque de novo.");
+            if (!_limiter.TryAcquire(device.Key, out var wait)) return RateLimited(ctx, wait);
             var op = Controller.SetPieceSample(p, body.SampleId);
             var web = Operations.AddOrGet(new WebOp
             {
@@ -290,7 +290,6 @@ internal sealed class PanelRuntime : IDisposable
         lock (_commandGate)
         {
             if (Operations.Find(device.Key, clientOpId) is { } existing) return Repeat(existing, fingerprint);
-            if (!_limiter.TryAcquire(device.Key, out var wait)) return RateLimited(ctx, wait);
             if (body.BaseVersion is not { } baseVersion || baseVersion < 0) return MissingBaseVersion();
             if (string.IsNullOrWhiteSpace(body.PresetId))
                 return Problem(400, "invalid_preset_id", "Preset inválido", "Escolha um preset da lista.");
@@ -301,6 +300,7 @@ internal sealed class PanelRuntime : IDisposable
             var snap = Controller.Snapshot;
             if (baseVersion > snap.Version || snap.KitVersion > baseVersion)
                 return Stale(device.Name, $"O kit mudou depois da versão {baseVersion}. Confira e toque de novo.");
+            if (!_limiter.TryAcquire(device.Key, out var wait)) return RateLimited(ctx, wait);
             var op = Controller.ApplyPreset(preset);
             var web = Operations.AddOrGet(new WebOp
             {
@@ -328,11 +328,11 @@ internal sealed class PanelRuntime : IDisposable
             var status = Server.AppStatus;
             if (!status.AllowPhoneTest)
                 return Problem(403, "test_not_allowed", "Teste desligado", "O teste pelo celular está desligado no PC.");
-            if (!_limiter.TryAcquire(device.Key, out var wait)) return RateLimited(ctx, wait);
             if (!status.AudioRunning)
                 return Problem(409, "audio_stopped", "Áudio parado", "O áudio está parado no PC: nada tocaria.");
             if (Backend.Engine.ActiveKit?[p].Samples is null)
                 return Problem(409, "no_sample", "Peça sem sample", $"{p.Label()} não tem sample.");
+            if (!_limiter.TryAcquire(device.Key, out var wait)) return RateLimited(ctx, wait);
             (Backend.RequestTest ?? (x => Backend.Engine.RequestTest(x, 1f)))(p);
             var web = Operations.AddOrGet(new WebOp
             {

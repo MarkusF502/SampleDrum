@@ -11,6 +11,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="SampleDrum.Core.Tests" />
+    <InternalsVisibleTo Include="SampleDrum.Remote.Tests" />
   </ItemGroup>
 
 </Project>
