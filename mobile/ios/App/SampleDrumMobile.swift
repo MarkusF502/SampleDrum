@@ -31,6 +31,7 @@ struct ConnectionView: View {
                     Text("Ou digite o endereço mostrado no PC")
                     TextField("http://192.168.1.10:8750/", text: $input).keyboardType(.URL)
                         .textInputAutocapitalization(.never).autocorrectionDisabled().textFieldStyle(.roundedBorder)
+                        .accessibilityIdentifier("pcAddress")
                     if !error.isEmpty { Text(error).foregroundStyle(.red).accessibilityAddTraits(.updatesFrequently) }
                     Button("Conectar ao PC") { connect(input) }.buttonStyle(.bordered).controlSize(.large)
                 }

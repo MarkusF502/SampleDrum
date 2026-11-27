@@ -27,6 +27,22 @@ jobs:
       - name: Build, test and lint Android
         working-directory: mobile/android
         run: gradle testDebugUnitTest lintDebug assembleRelease --no-daemon
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          profile: pixel_6
+          working-directory: mobile/android
+          script: |
+            gradle connectedDebugAndroidTest --no-daemon
+            adb shell am start -n com.markusf502.sampledrum/.MainActivity
+            sleep 2
+            adb exec-out screencap -p > app/build/reports/launcher.png
       - uses: actions/upload-artifact@v4
         with:
           name: android-unsigned
@@ -53,6 +69,21 @@ jobs:
       - name: Build iPhone app without signing
         working-directory: mobile/ios
         run: xcodebuild -project SampleDrumMobile.xcodeproj -scheme SampleDrumMobile -configuration Release -sdk iphoneos -derivedDataPath build-device CODE_SIGNING_ALLOWED=NO build
+      - name: Test launcher on iPhone simulator
+        working-directory: mobile/ios
+        run: |
+          SIMULATOR=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(v["udid"] for values in d["devices"].values() for v in values if v["name"].startswith("iPhone")))')
+          xcodebuild -project SampleDrumMobile.xcodeproj -scheme SampleDrumMobile -destination "id=$SIMULATOR" -derivedDataPath build -resultBundlePath build/UITests.xcresult CODE_SIGNING_ALLOWED=NO test
+          xcrun simctl launch "$SIMULATOR" com.markusf502.sampledrum
+          sleep 2
+          xcrun simctl io "$SIMULATOR" screenshot build/launcher.png
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-test-results
+          path: |
+            mobile/ios/build/UITests.xcresult
+            mobile/ios/build/launcher.png
       - name: Package simulator build
         working-directory: mobile/ios
         run: ditto -c -k --sequesterRsrc --keepParent build/Build/Products/Debug-iphonesimulator/SampleDrumMobile.app SampleDrumMobile-ios-simulator.zip

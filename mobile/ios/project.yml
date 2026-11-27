@@ -34,8 +34,19 @@ targets:
         TARGETED_DEVICE_FAMILY: '1,2'
         CODE_SIGN_STYLE: Automatic
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  SampleDrumMobileUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests]
+    dependencies:
+      - target: SampleDrumMobile
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
 schemes:
   SampleDrumMobile:
     build:
       targets:
         SampleDrumMobile: all
+    test:
+      targets: [SampleDrumMobileUITests]

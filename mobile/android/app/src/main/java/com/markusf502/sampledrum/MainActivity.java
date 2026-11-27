@@ -79,6 +79,7 @@ public final class MainActivity extends ComponentActivity {
         content.addView(qr);
         content.addView(text("Ou digite o endereço mostrado no PC", 16, ink));
         address = new EditText(this); address.setSingleLine(true); address.setTextColor(ink); address.setTextSize(17);
+        address.setContentDescription("Endereço do PC");
         address.setHintTextColor(muted); address.setHint("http://192.168.1.10:8750/");
         address.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
         address.setText(getPreferences(MODE_PRIVATE).getString("pc", ""));
