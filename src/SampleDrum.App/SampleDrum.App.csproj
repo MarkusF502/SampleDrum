@@ -14,12 +14,17 @@
     <!-- NAudio 3.x: the NAudio meta-package no longer includes ASIO; reference it directly. See docs/asio-naudio.md. -->
     <PackageReference Include="NAudio.Asio" Version="3.3.0" />
     <PackageReference Include="NAudio.WinMM" Version="3.3.0" />
+    <!-- QR code of the phone panel URL (MIT). -->
     <PackageReference Include="Net.Codecrete.QrCodeGenerator" Version="3.2.1" />
   </ItemGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\SampleDrum.Core\SampleDrum.Core.csproj" />
     <ProjectReference Include="..\SampleDrum.Remote\SampleDrum.Remote.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SampleDrum.App.Tests" />
   </ItemGroup>
 
 </Project>
