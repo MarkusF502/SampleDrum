@@ -71,6 +71,7 @@ public class E2EPanelTests
             ByPiece = cap.ByPiece.Select(a => a.Length >= sc.Length ? a[..sc.Length] : a.Concat(new float[sc.Length - a.Length]).ToArray()).ToArray(),
             Events = rig.SnapshotEvents().Where(e => e.Event.PlaybackSampleIndex < sc.Length).ToList(),
             BlockKits = cap.Kits, BlockGenerations = cap.Generations, Operations = ops, Callbacks = cap.Kits.Length,
+            RequireRingingAtSwap = false, // 4x + HTTP latency: reported, verified by the residual check
         };
         var rep = SwapHarness.Analyze(rec, o);
         Assert.True(rep.Passed, string.Join("\n", rep.Checks.Where(c => !c.Passed).Select(c => $"{c.Name}: {c.Detail}")));

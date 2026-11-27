@@ -173,6 +173,7 @@ public static class SwapCommand
             Scenario = sc, Mode = $"tempo real (FakeAudioHost, velocidade {speed.ToString("0.#", Inv)}x; operações enquanto o áudio roda)",
             BlockSize = o.BlockSize, ByPiece = byPiece, Events = events, BlockKits = rec.Kits, BlockGenerations = rec.Generations,
             Operations = ops, Callbacks = callbacks, HostInterrupted = fault is not null || stoppedEarly,
+            RequireRingingAtSwap = speed <= 1.0,
             HostNote = fault ?? (stoppedEarly ? "não terminou no tempo esperado" : null),
         };
     }

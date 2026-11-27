@@ -45,6 +45,13 @@ public sealed class SwapRecording
     public required long Callbacks { get; init; }
     /// <summary>Host stopped/restarted or faulted during the run (must be false).</summary>
     public bool HostInterrupted { get; init; }
+    /// <summary>
+    /// True (offline, real time at 1x): the swap must land while an earlier voice of that piece is still ringing, so
+    /// "old voice finishes with the old sample" is exercised. Accelerated real-time runs (speed &gt; 1) multiply the
+    /// scheduling latency in audio time, so there it is reported but not required; any voice that does cross a swap is
+    /// still verified by the residual check.
+    /// </summary>
+    public bool RequireRingingAtSwap { get; init; } = true;
     public string? HostNote { get; init; }
 }
 
@@ -243,9 +250,11 @@ public static class SwapHarness
             string oldName = SampleName(single.KitBefore?[o.SinglePiece]), newName = SampleName(single.KitAfter?[o.SinglePiece]);
             var ringing = before.Where(v => v.PlaybackSample + (single.KitBefore?[o.SinglePiece].Samples?.Length ?? 0) > sb * block).ToList();
             bool ok = after is not null && after.IdentifiedSample == newName && after.Ok
-                      && before.All(v => v.IdentifiedSample == oldName && v.Ok) && ringing.Count > 0 && residualPeaks[(int)o.SinglePiece] < ResidualLimit;
+                      && before.All(v => v.IdentifiedSample == oldName && v.Ok)
+                      && (ringing.Count > 0 || !r.RequireRingingAtSwap) && residualPeaks[(int)o.SinglePiece] < ResidualLimit;
             return (ok, $"troca no bloco {sb} ({Sec(sb.Value * block, sc)}); antes: {before.Count} voz(es) com {oldName} " +
-                        $"({ringing.Count} ainda soando na troca, sem corte); 1º golpe depois: {after?.IdentifiedSample ?? "nenhum"} " +
+                        $"({ringing.Count} ainda soando na troca, sem corte{(r.RequireRingingAtSwap ? "" : "; voz soando não exigida: rodada acelerada")}); " +
+                        $"1º golpe depois: {after?.IdentifiedSample ?? "nenhum"} " +
                         $"em {(after is null ? "—" : Sec(after.PlaybackSample, sc))} (esperado {newName})");
         }));
 
