@@ -144,5 +144,6 @@ public final class MainActivity extends ComponentActivity {
         if (selected != null) state.putString("origin",selected.origin + "/");
         super.onSaveInstanceState(state);
     }
+    @Override protected void onStop() { CookieManager.getInstance().flush(); super.onStop(); }
     @Override protected void onDestroy() { destroyPanel(); super.onDestroy(); }
 }

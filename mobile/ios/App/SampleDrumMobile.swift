@@ -109,7 +109,7 @@ struct PanelWebView: UIViewRepresentable {
         let json = String(data: try! JSONSerialization.data(withJSONObject: rules), encoding: .utf8)!
         WKContentRuleListStore.default().compileContentRuleList(forIdentifier: "SampleDrumSelectedPC", encodedContentRuleList: json) { list, _ in
             guard let list = list else { self.failure = true; return }
-            configuration.userContentController.add(list)
+            web.configuration.userContentController.add(list)
             web.load(URLRequest(url: address.url))
         }
         return web
