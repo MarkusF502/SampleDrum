@@ -683,7 +683,9 @@ public sealed class MainForm : Form
             _panels[(int)p].SetSampleText(SampleText(kit[p]) + (kit[p].SourcePath is null ? " [sintético]" : " [demonstração]"));
         }
         Log($"Kit sintético (semente {seed}) carregado: samples e ajustes de detecção da simulação (não salvos na " +
-            "configuração; o kit do operador volta ao escolher um driver ASIO, um sample ou um preset).");
+            (StartupOptions.SimulationMode
+                ? "configuração; samples e presets de demonstração podem ser trocados aqui ou pelo celular)."
+                : "configuração; o kit do operador volta ao escolher um driver ASIO, um sample ou um preset)."));
     }
 
     /// <summary>
