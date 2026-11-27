@@ -3,6 +3,7 @@ using SampleDrum.App.Audio;
 using SampleDrum.App.Harness;
 using SampleDrum.Core;
 using SampleDrum.Core.Kit;
+using SampleDrum.Remote;
 
 namespace SampleDrum.App;
 
@@ -30,6 +31,20 @@ public sealed class MainForm : Form
     private Task? _initialLoad;
     private long _eventCount;
     private string _lastLatencyText = "";
+
+    // Phone panel: one server per run over the same controller; the UI timer is the single engine sampler and fans
+    // meters/hits out to the web hub through _telemetry (the hub never reads the engine queues).
+    private readonly PanelTelemetry _telemetry = new();
+    private readonly DeviceRegistry _devices;
+    private readonly PanelServer _panelServer;
+    private readonly RemotePanelControl _remote;
+    private readonly SimulationLibrary? _simLibrary;   // --simulation: demo samples/presets in a temp folder
+    private readonly AppConfig? _startupCfg;           // --simulation: what the church config held at start
+    private int _stateChangedPosted;                   // coalesces controller StateChanged into one UI refresh
+    private long _shownVersion;
+    private long _shownKitVersion;
+    private long _persistBaseline = long.MaxValue;     // controller Version after the startup restore
+    private readonly System.Windows.Forms.Timer _saveTimer = new() { Interval = 500 };
 
     private readonly ComboBox _cmbDriver = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 300 };
     private readonly Button _btnPanel = new() { Text = "Painel ASIO", AutoSize = true };
@@ -71,8 +86,15 @@ public sealed class MainForm : Form
         _savedUseSimulation = _cfg.UseSimulation;
         _savedProfileName = _cfg.ActiveProfileName;
         _savedDriverName = _cfg.DriverName;
+        string? simNote = null;
         if (StartupOptions.SimulationMode)
         {
+            _startupCfg = AppConfig.Parse(_cfg.ToJson(), out _);
+            try { _simLibrary = SimulationLibrary.Create(StartupOptions.SimulationKit()); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                simNote = $"AVISO: não foi possível criar a biblioteca de demonstração da simulação ({ex.Message}).";
+            }
             // --simulation: Simulação profile + simulation host + synthetic kit (no ASIO driver is touched).
             _cfg.UseSimulation = true;
             _cfg.ActiveProfileName = RoutingProfiles.SimulationName;
@@ -80,7 +102,19 @@ public sealed class MainForm : Form
         _kit = new KitEngine(EngineRate, _cfg.ToKitSettings()) { KitEnabled = false }; // always start DISABLED
         foreach (var p in DrumPieces.All) _kit.SetPieceEnabled(p, _cfg[p].Enabled);
         _kit.ApplyKit(PreparedKit.Empty(EngineRate));
-        _controller = new KitController(_kit, new SampleLibrary(_cfg.EffectiveSamplesFolder));
+        _controller = new KitController(_kit, new SampleLibrary(_simLibrary?.SamplesFolder ?? _cfg.EffectiveSamplesFolder));
+        _shownVersion = _controller.Version;
+        _shownKitVersion = _controller.Snapshot.KitVersion;
+
+        // --simulation never reads or writes the operator's paired phones / panel settings.
+        _devices = new DeviceRegistry(StartupOptions.SimulationMode ? null : _cfg.RemotePanel.PairedDevices);
+        _panelServer = new PanelServer(new PanelBackend
+        {
+            Controller = _controller, Engine = _kit, Devices = _devices, Telemetry = _telemetry,
+            PresetsFolder = () => PresetsFolder,
+        });
+        _remote = new RemotePanelControl(_panelServer,
+            StartupOptions.SimulationMode ? new RemotePanelConfig() : _cfg.RemotePanel, StartupOptions.SimulationMode);
 
         BuildLayout();
         LoadConfigIntoUi();
@@ -91,17 +125,33 @@ public sealed class MainForm : Form
         Log("SampleDrum iniciado. O kit começa DESATIVADO.");
         Log($"Configurações: {AppConfig.DefaultFilePath}");
         if (cfgNote is not null) Log(cfgNote);
+        if (simNote is not null) Log(simNote);
         if (StartupOptions.SimulationMode)
         {
             Log("Modo --simulation: perfil \"Simulação\", host de simulação e kit sintético.");
+            if (_simLibrary is not null)
+                Log($"Simulação: biblioteca de demonstração em {_simLibrary.Root} (samples e presets de teste; nada disso vai " +
+                    "para a configuração da igreja).");
             _initialLoad = LoadSyntheticKitAsync(StartupOptions.SimulationSeed);
         }
         else
         {
             _initialLoad = LoadConfiguredSamplesAsync();
         }
+        // Changes that do not come from this window (the phone) are shown and saved only after the startup restore.
+        _initialLoad.ContinueWith(_ => PostToUi(() =>
+        {
+            _persistBaseline = _controller.Version;
+            OnControllerStateChanged();
+        }), TaskScheduler.Default);
         _uiTimer.Start();
     }
+
+    /// <summary>Samples folder in use (the demo library in --simulation).</summary>
+    private string SamplesFolder => _simLibrary?.SamplesFolder ?? _cfg.EffectiveSamplesFolder;
+
+    /// <summary>Presets folder in use (the demo presets in --simulation). Read by web threads too.</summary>
+    private string PresetsFolder => _simLibrary?.PresetsFolder ?? _cfg.EffectivePresetsFolder;
 
 
     // ---------- layout ----------
@@ -136,6 +186,7 @@ public sealed class MainForm : Form
             PiecePanel.Row(_btnKit, _lblKit),
             PiecePanel.Row(PiecePanel.Lbl("Preset:"), _cmbPresets, _btnLoadPreset, _btnPresetFile, _btnSavePreset),
             PiecePanel.Row(PiecePanel.Lbl("Samples:"), _lblSamples, _btnSamplesFolder)));
+        content.Controls.Add(_remote);
         foreach (var p in DrumPieces.All)
         {
             var panel = new PiecePanel(p) { Dock = DockStyle.None };
@@ -163,7 +214,7 @@ public sealed class MainForm : Form
             panel.AdvancedExpanded = _cfg[p].AdvancedExpanded;
             panel.SetSampleText(_cfg[p].SamplePath is null ? "nenhum sample" : $"carregando {Path.GetFileName(_cfg[p].SamplePath)}...");
         }
-        _lblSamples.Text = _cfg.EffectiveSamplesFolder;
+        _lblSamples.Text = SamplesFolder;
         RefreshPresetList();
         RefreshRouting();
     }
@@ -260,6 +311,91 @@ public sealed class MainForm : Form
         _sim.SyntheticKitRequested += async (_, seed) => await LoadSyntheticKitAsync(seed);
         _uiTimer.Tick += (_, _) => OnUiTick();
         FormClosing += (_, _) => OnClosing();
+
+        // Phone panel.
+        _controller.StateChanged += (_, _) =>
+        {
+            // Controller worker thread: never wait for the UI; one pending refresh at a time.
+            if (Interlocked.Exchange(ref _stateChangedPosted, 1) == 0) PostToUi(OnControllerStateChanged);
+        };
+        _saveTimer.Tick += (_, _) => { _saveTimer.Stop(); SaveConfig(); };
+        _panelServer.Log += msg => PostToUi(() => Log(msg));
+        _devices.Changed += (_, _) => PostToUi(() =>
+        {
+            if (StartupOptions.SimulationMode) return;
+            _cfg.RemotePanel.PairedDevices = _devices.Export();
+            ScheduleSave();
+        });
+        _remote.LogMessage += Log;
+        _remote.SettingsChanged += (_, _) =>
+        {
+            PushPanelStatus();
+            if (StartupOptions.SimulationMode) return;   // a simulation run never changes the church panel settings
+            _cfg.RemotePanel.Enabled = _remote.WantEnabled;
+            _cfg.RemotePanel.Port = _remote.Port;
+            _cfg.RemotePanel.BindAddress = _remote.BindAddress;
+            _cfg.RemotePanel.AllowPhoneTest = _remote.AllowPhoneTest;
+            SaveConfig();
+        };
+        Shown += async (_, _) => await _remote.StartIfWantedAsync();
+    }
+
+    /// <summary>
+    /// UI thread: the controller state changed (PC or phone). Panels follow the snapshot; kit selection changes made
+    /// after the startup restore are copied into the configuration and saved (debounced, atomic). Nothing from a
+    /// --simulation run or from the synthetic kit is saved over the operator's kit.
+    /// </summary>
+    private void OnControllerStateChanged()
+    {
+        Interlocked.Exchange(ref _stateChangedPosted, 0);
+        var snap = _controller.Snapshot;
+        if (snap.Version == _shownVersion) return;
+        bool selectionChanged = snap.KitVersion != _shownKitVersion;
+        _shownVersion = snap.Version;
+        _shownKitVersion = snap.KitVersion;
+        var kit = _kit.ActiveKit;
+        foreach (var p in DrumPieces.All)
+        {
+            var panel = _panels[(int)p];
+            var ps = snap.Pieces[(int)p];
+            if (selectionChanged && kit is not null)
+            {
+                panel.SetSampleText(SampleText(kit[p]) + (_syntheticActive && kit[p].SourcePath is null && kit[p].Samples is not null ? " [sintético]" : ""));
+                panel.ShowSettings(ps.Settings);             // a preset may carry gain/detection
+            }
+            panel.SetPieceEnabled(ps.Enabled);
+        }
+        UpdateKitUi();
+        if (StartupOptions.SimulationMode || _syntheticActive || _controller.Version < _persistBaseline) return;
+        foreach (var ps in snap.Pieces)
+        {
+            if (ps.SampleVersion > _persistBaseline) _cfg[ps.Piece].SamplePath = ps.SamplePath;
+            _cfg[ps.Piece].Enabled = ps.Enabled;
+            _cfg.SetPieceSettings(ps.Piece, ps.Settings);
+        }
+        if (snap.KitVersion > _persistBaseline) _cfg.ActivePresetId = snap.ActivePresetId;
+        ScheduleSave();
+    }
+
+    private void ScheduleSave()
+    {
+        _saveTimer.Stop();
+        _saveTimer.Start();
+    }
+
+    /// <summary>App values the phone shows (profile, audio running, routes, test permission).</summary>
+    private void PushPanelStatus()
+    {
+        if (_panelServer is null || _remote is null) return;   // during construction
+        var v = RoutingValidator.Validate(_cfg.ActiveProfile);
+        _panelServer.AppStatus = new PanelAppStatus
+        {
+            ProfileName = _cfg.ActiveProfile.Name,
+            Simulation = StartupOptions.SimulationMode,
+            AudioRunning = _host?.IsRunning == true,
+            AllowPhoneTest = _remote.AllowPhoneTest,
+            Routed = DrumPieces.All.Select(v.IsRunnable).ToArray(),
+        };
     }
 
     private bool IsSimulationSelected => _cmbDriver.SelectedIndex <= 0;
@@ -292,6 +428,7 @@ public sealed class MainForm : Form
                 ? $"{v.RunnablePieces.Count} de {DrumPieces.Count} peças recebem sinal na simulação (só as roteadas no perfil)"
                 : $"{v.RunnablePieces.Count} de {DrumPieces.Count} peças rodam no ASIO";
         _lblRouting.ForeColor = v.HasErrors ? Color.DarkRed : SystemColors.ControlText;
+        PushPanelStatus();
     }
 
     private void EditRoutes()
@@ -359,8 +496,9 @@ public sealed class MainForm : Form
             Filter = "Arquivos WAV (*.wav)|*.wav|Todos os arquivos (*.*)|*.*",
         };
         var current = _cfg[p].SamplePath;
-        dlg.InitialDirectory = current is not null && Path.IsPathRooted(current) ? Path.GetDirectoryName(current)
-            : Directory.Exists(_cfg.EffectiveSamplesFolder) ? _cfg.EffectiveSamplesFolder : null;
+        dlg.InitialDirectory = current is not null && Path.IsPathRooted(current) && !StartupOptions.SimulationMode
+            ? Path.GetDirectoryName(current)
+            : Directory.Exists(SamplesFolder) ? SamplesFolder : null;
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
         await SetPieceSampleAsync(p, dlg.FileName);
     }
@@ -371,7 +509,7 @@ public sealed class MainForm : Form
     /// </summary>
     private async Task SetPieceSampleAsync(DrumPiece p, string? path)
     {
-        if (!await LeaveSyntheticAsync("troca de sample")) return;
+        if (!StartupOptions.SimulationMode && !await LeaveSyntheticAsync("troca de sample")) return;
         var r = await _controller.SetPieceSamplePath(p, path).Completion;
         switch (r.Status)
         {
@@ -395,7 +533,7 @@ public sealed class MainForm : Form
     /// <summary>Applies a preset through the controller: ALL samples prepared first; only a complete kit is applied (one swap).</summary>
     private async Task ApplyPresetAsync(KitPreset preset)
     {
-        if (!await LeaveSyntheticAsync("preset escolhido")) return;
+        if (!StartupOptions.SimulationMode && !await LeaveSyntheticAsync("preset escolhido")) return;
         Log($"Preparando o preset \"{preset.Name}\"...");
         var r = await _controller.ApplyPreset(preset).Completion;
         switch (r.Status)
@@ -424,7 +562,7 @@ public sealed class MainForm : Form
     private async Task OpenPresetFileAsync()
     {
         using var dlg = new OpenFileDialog { Title = "Abrir preset de kit", Filter = "Preset SampleDrum (*.json)|*.json" };
-        if (Directory.Exists(_cfg.EffectivePresetsFolder)) dlg.InitialDirectory = _cfg.EffectivePresetsFolder;
+        if (Directory.Exists(PresetsFolder)) dlg.InitialDirectory = PresetsFolder;
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
         KitPreset preset;
         try { preset = KitPreset.Load(dlg.FileName); }
@@ -440,7 +578,7 @@ public sealed class MainForm : Form
     {
         string? name = Prompt("Salvar preset", "Nome do preset:", _kit.ActiveKit?.Name is { Length: > 0 } n && n != "configuração" ? n : "Kit");
         if (string.IsNullOrWhiteSpace(name)) return;
-        string path = Path.Combine(_cfg.EffectivePresetsFolder, KitPreset.FileNameFor(name));
+        string path = Path.Combine(PresetsFolder, KitPreset.FileNameFor(name));
         try
         {
             _cfg.ToPreset(name.Trim()).Save(path);
@@ -455,7 +593,7 @@ public sealed class MainForm : Form
 
     private void RefreshPresetList(string? select = null)
     {
-        var presets = KitPreset.LoadFolder(_cfg.EffectivePresetsFolder, out var errors);
+        var presets = KitPreset.LoadFolder(PresetsFolder, out var errors);
         _cmbPresets.Items.Clear();
         foreach (var p in presets) _cmbPresets.Items.Add(new PresetItem(p));
         foreach (var e in errors) Log($"AVISO: preset ignorado: {e}");
@@ -468,7 +606,7 @@ public sealed class MainForm : Form
     private async Task ChooseSamplesFolderAsync()
     {
         using var dlg = new FolderBrowserDialog { Description = "Pasta com os samples (WAV)", UseDescriptionForTitle = true };
-        if (Directory.Exists(_cfg.EffectiveSamplesFolder)) dlg.SelectedPath = _cfg.EffectiveSamplesFolder;
+        if (Directory.Exists(SamplesFolder)) dlg.SelectedPath = SamplesFolder;
         if (dlg.ShowDialog(this) != DialogResult.OK) return;
         // Same controller for the whole run: the folder change is an operation (Version keeps increasing).
         var r = await _controller.SetLibraryFolder(dlg.SelectedPath).Completion;
@@ -526,8 +664,9 @@ public sealed class MainForm : Form
     /// </summary>
     private async Task LoadSyntheticKitAsync(int seed)
     {
+        bool sameSeed = StartupOptions.SimulationSeed == seed;
         StartupOptions.SimulationSeed = seed;
-        var kit = StartupOptions.SimulationKit();
+        var kit = _simLibrary is not null && sameSeed ? _simLibrary.Kit : StartupOptions.SimulationKit();
         var settings = StartupOptions.SimulationKitSettings();
         var operatorKit = _syntheticActive ? _operatorKit : _kit.ActiveKit;
         var r = await _controller.ApplyKit(kit, settings).Completion;
@@ -541,7 +680,7 @@ public sealed class MainForm : Form
         foreach (var p in DrumPieces.All)
         {
             _panels[(int)p].ShowSettings(settings[p]);
-            _panels[(int)p].SetSampleText(SampleText(kit[p]) + " [sintético]");
+            _panels[(int)p].SetSampleText(SampleText(kit[p]) + (kit[p].SourcePath is null ? " [sintético]" : " [demonstração]"));
         }
         Log($"Kit sintético (semente {seed}) carregado: samples e ajustes de detecção da simulação (não salvos na " +
             "configuração; o kit do operador volta ao escolher um driver ASIO, um sample ou um preset).");
@@ -749,6 +888,7 @@ public sealed class MainForm : Form
         _sim.Visible = IsSimulationSelected;
         _sim.SetRunning(running);
         if (!running) _lblAudio.Text = "Áudio parado";
+        PushPanelStatus();
     }
 
     // ---------- 30 Hz UI refresh ----------
@@ -756,7 +896,12 @@ public sealed class MainForm : Form
     private void OnUiTick()
     {
         var now = DateTime.UtcNow;
-        foreach (var panel in _panels) panel.UpdateMeter(_kit.ReadAndResetInputPeak(panel.Piece), now);
+        foreach (var panel in _panels)
+        {
+            float peak = _kit.ReadAndResetInputPeak(panel.Piece);   // single consumer: this timer
+            panel.UpdateMeter(peak, now);
+            _telemetry.PublishPeak(panel.Piece, peak);
+        }
 
         StringBuilder? sb = null;
         int drained = 0;
@@ -765,6 +910,7 @@ public sealed class MainForm : Form
             drained++;
             var e = ke.Event;
             _panels[(int)ke.Piece].Flash(e.IsManualTest, now);
+            _telemetry.PublishHit(ke.Piece, e.Velocity, e.IsManualTest);
             sb ??= new StringBuilder();
             double t = e.SampleIndex / (double)EngineRate;
             if (e.IsManualTest)
@@ -842,8 +988,19 @@ public sealed class MainForm : Form
             if (StartupOptions.SimulationMode)
             {
                 // A --simulation run never changes what the operator chose for normal runs, and never creates the
-                // settings file when it does not exist yet (see AppConfig.SaveSimulationRun).
-                _cfg.SaveSimulationRun(AppConfig.DefaultFilePath, _savedUseSimulation, _savedProfileName, _savedDriverName);
+                // settings file when it does not exist yet (see AppConfig.SaveSimulationRun). The kit selection, the
+                // samples/presets folders and the phone panel (paired phones included) stay as they were at start:
+                // the run works on a demo library in a temp folder.
+                var copy = AppConfig.Parse(_cfg.ToJson(), out _);
+                if (_startupCfg is { } start)
+                {
+                    copy.SamplesFolder = start.SamplesFolder;
+                    copy.PresetsFolder = start.PresetsFolder;
+                    copy.ActivePresetId = start.ActivePresetId;
+                    copy.RemotePanel = start.RemotePanel;
+                    foreach (var p in DrumPieces.All) copy[p].SamplePath = start[p].SamplePath;
+                }
+                copy.SaveSimulationRun(AppConfig.DefaultFilePath, _savedUseSimulation, _savedProfileName, _savedDriverName);
             }
             else
             {
@@ -861,9 +1018,14 @@ public sealed class MainForm : Form
     private void OnClosing()
     {
         _uiTimer.Stop();
+        _saveTimer.Stop();
+        // Panel first (closes phone connections); off the UI thread so nothing can wait on it.
+        try { Task.Run(() => _panelServer.StopAsync()).Wait(TimeSpan.FromSeconds(4)); }
+        catch (AggregateException ex) { Log($"AVISO ao parar o painel do celular: {ex.InnerException?.Message}"); }
         DisposeHost();
         // The controller worker never touches the UI, so waiting here cannot deadlock.
         _controller.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(2));
         SaveConfig();
+        _simLibrary?.Dispose();
     }
 }

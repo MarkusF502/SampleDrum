@@ -22,6 +22,9 @@ public sealed class RemotePanelConfig
 
     public bool Enabled { get; set; }
     public int Port { get; set; } = DefaultPort;
+
+    /// <summary>IPv4 of the network chosen on the PC (null = first candidate). "0.0.0.0" only if chosen explicitly.</summary>
+    public string? BindAddress { get; set; }
     public bool AllowPhoneTest { get; set; }
     public List<PairedDeviceConfig> PairedDevices { get; set; } = [];
 }
