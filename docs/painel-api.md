@@ -96,8 +96,8 @@ Content-Type: application/json
    - `Origin` obrigatório e igual a `http://` + um Host permitido → senão `403 origin_not_allowed`.
    - `Content-Type: application/json` (com ou sem `; charset=utf-8`) → senão `415 unsupported_media_type`.
    - Corpo JSON com um **objeto** (`{}` quando não há campos) → senão `400 invalid_json`. Máximo 8 KB → `413 payload_too_large`.
-4. **Limites**: comandos (`sample`, `preset`, `test`) até 5 por segundo por aparelho → `429 rate_limited` +
-   `Retry-After`; no máximo **4 conexões SSE por aparelho** (`429 too_many_connections`) e 32 no total.
+4. **Limites**: comandos **aceitos** (`sample`, `preset`, `test`) até 5 por segundo por aparelho; o 6º →
+   `429 rate_limited` + `Retry-After` (pedidos recusados por validação ou `stale_state` não contam); no máximo **4 conexões SSE por aparelho** (`429 too_many_connections`) e 32 no total.
 
 ## 4. Estado
 
@@ -242,7 +242,9 @@ POST /api/pieces/kick/test
   "errors": [], "resultVersion": 43 }
 ```
 
-- `kind`: `pieceSample` | `preset` | `test`. `piece` só em `pieceSample`/`test`; `presetId` só em `preset`.
+- `kind`: `pieceSample` | `preset` | `test` (pedidos do celular). Operações feitas no PC, consultadas pelo `opId`, podem
+  ter também `kit`, `pieceGain`, `pieceEnabled`, `pieceSettings`, `kitEnabled`, `libraryFolder`. `piece` só quando a
+  operação é de uma peça; `presetId` só em `preset`; `sampleId` só em `pieceSample` do celular.
 - `status`: `queued` → `preparing` → `applied` | `failed` | `superseded`.
 - `engineConfirmed`: `true` quando a thread de áudio **já tocou com o kit** desta operação
   (`KitEngine.AppliedKitGeneration` alcançou a geração produzida por ela) com o áudio rodando. Com o áudio parado fica
