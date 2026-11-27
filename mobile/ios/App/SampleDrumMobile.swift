@@ -58,7 +58,7 @@ struct ConnectionView: View {
             savedPC = a.baseURL // Pairing code and raw token never enter UserDefaults.
             error = ""
             session = PanelSession(address: a)
-        } catch { error = "Use o endereço ou QR mostrado no PC, como http://192.168.1.10:8750/." }
+        } catch { self.error = "Use o endereço ou QR mostrado no PC, como http://192.168.1.10:8750/." }
     }
 }
 
