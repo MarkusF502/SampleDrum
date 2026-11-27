@@ -50,6 +50,8 @@ samples com os microfones originais na mesa.
 
 ## Baixar PC e usar no celular
 
+Também há aplicativos companheiros nativos para Android e iPhone: [instruções, builds e distribuição mobile](mobile/README.md). O Android usa APK; a distribuição iPhone depende da assinatura Apple/TestFlight.
+
 Os pacotes estão nas [releases do GitHub](https://github.com/MarkusF502/SampleDrum/releases). Baixe o ZIP `win-x64`, extraia tudo e abra `SampleDrum.App.exe` (ou `Iniciar-simulacao.cmd` para a demonstração). O painel mobile já vem no aplicativo: abra pelo QR no navegador do celular. O ZIP `mobile-web` é uma cópia dos arquivos para desenvolvimento, não precisa instalá-lo no telefone.
 
 Validação e limites da versão: [docs/release-v0.3.0.md](docs/release-v0.3.0.md).

@@ -29,7 +29,7 @@ if (!(Test-Path -LiteralPath $passwordFile)) { throw 'Signing password missing. 
 $aligned = "$OutputApk.aligned"
 & $align -f -P 16 4 $InputApk $aligned
 if ($LASTEXITCODE -ne 0) { throw 'APK alignment failed.' }
-& $java -jar $signer sign --ks $key --ks-key-alias sampledrum --ks-pass "file:$passwordFile" --key-pass "file:$passwordFile" --out $OutputApk $aligned
+& $java -jar $signer sign --ks $key --ks-key-alias sampledrum --ks-pass "file:$passwordFile" --out $OutputApk $aligned
 if ($LASTEXITCODE -ne 0) { throw 'APK signing failed.' }
 & $java -jar $signer verify --verbose --print-certs $OutputApk
 if ($LASTEXITCODE -ne 0) { throw 'APK signature verification failed.' }
