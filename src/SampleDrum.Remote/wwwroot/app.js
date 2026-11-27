@@ -365,7 +365,6 @@ function renderCard(id, p) {
   const c = ensureCard(id);
   const label = pieceLabel(id, p);
   const pending = p.route === 'pending';
-  const selectable = p.selectable !== false;
   c.root.hidden = false;
   c.root.classList.toggle('pending', pending);
   c.label.textContent = label;
@@ -375,8 +374,8 @@ function renderCard(id, p) {
   const sample = app.shown[id];
   c.sampleName.textContent = sample ? (sample.name || sample.id) : 'Sem sample';
   const dur = sample ? fmtDuration(sample.durationMs) : '';
-  c.sampleMeta.textContent = selectable ? (dur ? `${dur} · toque para trocar` : 'Toque para escolher') : 'Troca indisponível agora';
-  c.sampleBtn.disabled = !online() || !selectable;
+  c.sampleMeta.textContent = dur ? `${dur} · toque para trocar` : 'Toque para escolher';
+  c.sampleBtn.disabled = !online();
   c.sampleBtn.setAttribute('aria-label', `${label}: ${sample ? sample.name || sample.id : 'sem sample'}. Trocar sample.`);
   c.testBtn.hidden = app.state.allowPhoneTest !== true;
   const audioOn = app.state.audioRunning !== false;
@@ -506,8 +505,11 @@ function errorsText(rec) {
   const errs = Array.isArray(rec.errors) ? rec.errors : [];
   const relevant = rec.kind === 'preset' ? errs : errs.filter((e) => !e.piece || e.piece === rec.target);
   const list = (relevant.length ? relevant : errs).map((e) => {
-    const msg = e.message || ERROR_TEXT[fold(e.code).replace(/[^a-z]/g, '')] || e.code || 'erro';
-    return rec.kind === 'preset' && e.piece ? `${pieceLabel(e.piece)}: ${msg}` : msg;
+    // Caminho do disco do PC (C:\...\x.wav ou \\servidor\...) vira só o nome do arquivo.
+    const msg = String(e.message || ERROR_TEXT[fold(e.code).replace(/[^a-z]/g, '')] || e.code || 'erro')
+      .replace(/(?:[A-Za-z]:\\|\\\\)[^:;\n]*\\([^\\:;\n]+)/g, '$1');
+    const label = e.piece ? pieceLabel(e.piece) : '';
+    return rec.kind === 'preset' && label && !msg.startsWith(`${label}:`) ? `${label}: ${msg}` : msg;
   });
   return list.length ? list.join('; ') : 'erro desconhecido';
 }
@@ -882,7 +884,7 @@ function onHit(h) {
 function openPicker(piece) {
   if (!online()) { toast('Sem conexão com o PC.'); return; }
   const p = app.state.pieces.find((x) => x.piece === piece);
-  if (!p || p.selectable === false) return;
+  if (!p) return;
   app.picker = { piece, baseVersion: app.state.version, opener: document.activeElement };
   ui.pickerTitle.textContent = `${pieceLabel(piece, p)}: escolher sample`;
   ui.pickerSearch.value = '';
@@ -1039,6 +1041,11 @@ function bind() {
     else if (app.picker) closePicker(false);
   });
   window.addEventListener('popstate', () => { if (app.picker) closePicker(true); });
+  // QR lido com a página já aberta: só o fragmento muda (sem recarregar).
+  window.addEventListener('hashchange', () => {
+    const code = readPairFragment();
+    if (code) { ui.pairCode.value = code; if (app.view === 'pair') setPairMsg('', ''); }
+  });
   window.addEventListener('offline', () => { if (app.view === 'main') { markDisconnected(); setConn('offline'); } });
   window.addEventListener('online', () => { if (app.view === 'main' && app.conn !== 'online') { app.retryCount = 0; probe(); } });
   document.addEventListener('visibilitychange', () => {
