@@ -3,6 +3,7 @@ using SampleDrum.App.Audio;
 using SampleDrum.App.Harness;
 using SampleDrum.Core;
 using SampleDrum.Core.Kit;
+using SampleDrum.Core.Simulation;
 using SampleDrum.Remote;
 
 namespace SampleDrum.App;
@@ -25,9 +26,6 @@ public sealed class MainForm : Form
     private bool _kitWanted;           // last requested kit master state (button toggles this)
     private bool _syntheticActive;     // the synthetic simulation kit is loaded in the engine (never persisted)
     private PreparedKit? _operatorKit; // operator's kit saved when the synthetic kit was loaded
-    private readonly bool _savedUseSimulation;     // persisted values a --simulation run must not overwrite
-    private readonly string _savedProfileName;
-    private readonly string? _savedDriverName;
     private Task? _initialLoad;
     private long _eventCount;
     private string _lastLatencyText = "";
@@ -38,8 +36,7 @@ public sealed class MainForm : Form
     private readonly DeviceRegistry _devices;
     private readonly PanelServer _panelServer;
     private readonly RemotePanelControl _remote;
-    private readonly SimulationLibrary? _simLibrary;   // --simulation: demo samples/presets in a temp folder
-    private readonly AppConfig? _startupCfg;           // --simulation: what the church config held at start
+    private readonly SimulationSampleLibrary? _simLibrary;   // --simulation: demo samples/presets in a temp folder
     private int _stateChangedPosted;                   // coalesces controller StateChanged into one UI refresh
     private long _shownVersion;
     private long _shownKitVersion;
@@ -82,15 +79,11 @@ public sealed class MainForm : Form
         MinimumSize = new Size(960, 700);
         Size = new Size(1060, 980);
 
-        _cfg = AppConfig.Load(out var cfgNote);
-        _savedUseSimulation = _cfg.UseSimulation;
-        _savedProfileName = _cfg.ActiveProfileName;
-        _savedDriverName = _cfg.DriverName;
+        _cfg = AppConfig.Load(SettingsPath, out var cfgNote);
         string? simNote = null;
         if (StartupOptions.SimulationMode)
         {
-            _startupCfg = AppConfig.Parse(_cfg.ToJson(), out _);
-            try { _simLibrary = SimulationLibrary.Create(StartupOptions.SimulationKit()); }
+            try { _simLibrary = StartupOptions.EnsureSimulationLibrary(); }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
                 simNote = $"AVISO: não foi possível criar a biblioteca de demonstração da simulação ({ex.Message}).";
@@ -123,7 +116,9 @@ public sealed class MainForm : Form
         UpdateAudioUi();
 
         Log("SampleDrum iniciado. O kit começa DESATIVADO.");
-        Log($"Configurações: {AppConfig.DefaultFilePath}");
+        Log(StartupOptions.SimulationMode
+            ? $"Configurações: {SettingsPath} (só leitura nesta simulação: nada é gravado)"
+            : $"Configurações: {SettingsPath}");
         if (cfgNote is not null) Log(cfgNote);
         if (simNote is not null) Log(simNote);
         if (StartupOptions.SimulationMode)
@@ -146,6 +141,13 @@ public sealed class MainForm : Form
         }), TaskScheduler.Default);
         _uiTimer.Start();
     }
+
+    /// <summary>Settings file (tests point it elsewhere). A --simulation run only reads it.</summary>
+    internal static string SettingsPath { get; set; } = AppConfig.DefaultFilePath;
+
+    internal KitController Controller => _controller;
+    internal PanelServer PanelServer => _panelServer;
+    internal Task InitialLoad => _initialLoad ?? Task.CompletedTask;
 
     /// <summary>Samples folder in use (the demo library in --simulation).</summary>
     private string SamplesFolder => _simLibrary?.SamplesFolder ?? _cfg.EffectiveSamplesFolder;
@@ -514,8 +516,11 @@ public sealed class MainForm : Form
         switch (r.Status)
         {
             case KitOperationStatus.Applied:
-                _cfg[p].SamplePath = path;
-                _cfg.ActivePresetId = null;                       // custom selection
+                if (!StartupOptions.SimulationMode)
+                {
+                    _cfg[p].SamplePath = path;
+                    _cfg.ActivePresetId = null;                   // custom selection
+                }
                 _panels[(int)p].SetSampleText(SampleText(_kit.ActiveKit![p]));
                 Log(path is null ? $"{p.Label()}: sem sample." : $"{p.Label()}: sample {path} (vale a partir do próximo golpe).");
                 SaveConfig();
@@ -539,7 +544,7 @@ public sealed class MainForm : Form
         switch (r.Status)
         {
             case KitOperationStatus.Applied:
-                _cfg.ApplyPreset(preset);
+                if (!StartupOptions.SimulationMode) _cfg.ApplyPreset(preset);
                 var settings = _kit.Settings;
                 foreach (var p in DrumPieces.All)
                 {
@@ -616,7 +621,7 @@ public sealed class MainForm : Form
             Log("Pasta de samples NÃO trocada.");
             return;
         }
-        _cfg.SamplesFolder = dlg.SelectedPath;
+        if (!StartupOptions.SimulationMode) _cfg.SamplesFolder = dlg.SelectedPath;
         _lblSamples.Text = dlg.SelectedPath;
         var list = _controller.Library.List();
         Log($"Pasta de samples: {dlg.SelectedPath} ({list.Count} WAV)" +
@@ -664,9 +669,8 @@ public sealed class MainForm : Form
     /// </summary>
     private async Task LoadSyntheticKitAsync(int seed)
     {
-        bool sameSeed = StartupOptions.SimulationSeed == seed;
         StartupOptions.SimulationSeed = seed;
-        var kit = _simLibrary is not null && sameSeed ? _simLibrary.Kit : StartupOptions.SimulationKit();
+        var kit = StartupOptions.SimulationKit();
         var settings = StartupOptions.SimulationKitSettings();
         var operatorKit = _syntheticActive ? _operatorKit : _kit.ActiveKit;
         var r = await _controller.ApplyKit(kit, settings).Completion;
@@ -680,7 +684,7 @@ public sealed class MainForm : Form
         foreach (var p in DrumPieces.All)
         {
             _panels[(int)p].ShowSettings(settings[p]);
-            _panels[(int)p].SetSampleText(SampleText(kit[p]) + (kit[p].SourcePath is null ? " [sintético]" : " [demonstração]"));
+            _panels[(int)p].SetSampleText(SampleText(kit[p]) + " [sintético]");
         }
         Log($"Kit sintético (semente {seed}) carregado: samples e ajustes de detecção da simulação (não salvos na " +
             (StartupOptions.SimulationMode
@@ -984,36 +988,19 @@ public sealed class MainForm : Form
 
     private void SaveConfig()
     {
+        // A --simulation run never writes the settings file (not even to create it): its kit, demo library, folders,
+        // paired phones and panel settings live in memory only, so the operator's configuration stays byte-identical.
+        if (StartupOptions.SimulationMode) return;
         foreach (var panel in _panels) _cfg[panel.Piece].AdvancedExpanded = panel.AdvancedExpanded;
         try
         {
-            if (StartupOptions.SimulationMode)
-            {
-                // A --simulation run never changes what the operator chose for normal runs, and never creates the
-                // settings file when it does not exist yet (see AppConfig.SaveSimulationRun). The kit selection, the
-                // samples/presets folders and the phone panel (paired phones included) stay as they were at start:
-                // the run works on a demo library in a temp folder.
-                var copy = AppConfig.Parse(_cfg.ToJson(), out _);
-                if (_startupCfg is { } start)
-                {
-                    copy.SamplesFolder = start.SamplesFolder;
-                    copy.PresetsFolder = start.PresetsFolder;
-                    copy.ActivePresetId = start.ActivePresetId;
-                    copy.RemotePanel = start.RemotePanel;
-                    foreach (var p in DrumPieces.All) copy[p].SamplePath = start[p].SamplePath;
-                }
-                copy.SaveSimulationRun(AppConfig.DefaultFilePath, _savedUseSimulation, _savedProfileName, _savedDriverName);
-            }
-            else
-            {
-                _cfg.UseSimulation = IsSimulationSelected;
-                if (!IsSimulationSelected) _cfg.DriverName = (string)_cmbDriver.SelectedItem!;
-                _cfg.Save();
-            }
+            _cfg.UseSimulation = IsSimulationSelected;
+            if (!IsSimulationSelected) _cfg.DriverName = (string)_cmbDriver.SelectedItem!;
+            _cfg.Save(SettingsPath);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            Log($"AVISO: não foi possível salvar {AppConfig.DefaultFilePath}: {ex.Message}");
+            Log($"AVISO: não foi possível salvar {SettingsPath}: {ex.Message}");
         }
     }
 
@@ -1028,6 +1015,6 @@ public sealed class MainForm : Form
         // The controller worker never touches the UI, so waiting here cannot deadlock.
         _controller.DisposeAsync().AsTask().Wait(TimeSpan.FromSeconds(2));
         SaveConfig();
-        _simLibrary?.Dispose();
+        if (_simLibrary is not null) StartupOptions.CleanupSimulationLibrary();
     }
 }

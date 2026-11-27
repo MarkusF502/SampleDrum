@@ -107,7 +107,7 @@ internal sealed class PanelRuntime : IDisposable
         { await WriteProblem(ctx, 403, "host_not_allowed", "Endereço não permitido", "Abra o painel pelo endereço mostrado no PC."); return; }
         if (!Guard.IsRemoteAllowed(ctx.Connection.RemoteIpAddress))
         { await WriteProblem(ctx, 403, "network_not_allowed", "Rede não permitida", "O celular precisa estar na mesma rede local do PC."); return; }
-        if (!HttpMethods.IsGet(req.Method) && !HttpMethods.IsPost(req.Method) && !HttpMethods.IsHead(req.Method))
+        if (!HttpMethods.IsGet(req.Method) && !HttpMethods.IsPost(req.Method))   // HEAD/OPTIONS/PUT...: 405
         { await WriteProblem(ctx, 405, "method_not_allowed", "Método não permitido", $"Método {req.Method} não é aceito."); return; }
 
         if (HttpMethods.IsPost(req.Method))
@@ -452,7 +452,7 @@ internal sealed class PanelRuntime : IDisposable
         // Errors of operations that are not about one piece carry a placeholder piece in Core: report null.
         bool pieceErrors = s.Kind is KitOperationKind.PieceSample or KitOperationKind.Preset;
         var errors = s.Errors.Select(e => new OperationErrorDto(pieceErrors ? Wire.PieceId(e.Piece) : null,
-            Wire.ErrorCode(e.Code), e.Message)).ToArray();
+            Wire.ErrorCode(e.Code), Wire.PhoneMessage(e))).ToArray();
         return new OperationDto(s.Id.ToString("D"), web?.ClientOpId, kind,
             s.Piece is { } pc ? Wire.PieceId(pc) : null, web?.SampleId, web?.PresetId,
             Wire.Status(s.Status), confirmed, status.AudioRunning, errors,

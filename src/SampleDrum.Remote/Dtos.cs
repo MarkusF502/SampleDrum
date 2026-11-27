@@ -133,6 +133,38 @@ public static class Wire
         _ => "failed",
     };
 
+    /// <summary>
+    /// pt-BR message for the phone, built from the stable code and the sample FILE NAME only. Never Core's message:
+    /// it carries the PC's absolute path and repeats the piece label (the piece is its own field).
+    /// </summary>
+    public static string PhoneMessage(PieceLoadError e)
+    {
+        string? file = SafeFileName(e.Path);
+        string named = file is null ? "" : $" ({file})";
+        return e.Code switch
+        {
+            PieceLoadErrorCode.FileNotFound => $"arquivo não encontrado na pasta de samples do PC{named}.",
+            PieceLoadErrorCode.UnsupportedFormat => $"arquivo de áudio inválido ou não suportado{named}.",
+            PieceLoadErrorCode.TooLong => $"sample longo demais{named}; máximo {SampleLibrary.MaxSampleSeconds:0} s.",
+            PieceLoadErrorCode.OutsideLibrary => "sample fora da biblioteca do PC.",
+            PieceLoadErrorCode.IoError => $"não foi possível ler o sample{named}.",
+            PieceLoadErrorCode.InvalidArgument => "pedido inválido.",
+            _ => "falha inesperada no PC; o kit atual foi mantido.",
+        };
+    }
+
+    /// <summary>File name of a path (no folders, no drive), or null.</summary>
+    internal static string? SafeFileName(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path)) return null;
+        string name = path.Replace('\\', '/');
+        int slash = name.LastIndexOf('/');
+        if (slash >= 0) name = name[(slash + 1)..];
+        int colon = name.LastIndexOf(':');
+        if (colon >= 0) name = name[(colon + 1)..];
+        return name.Length == 0 ? null : name;
+    }
+
     /// <summary>Stable snake_case code of a piece load error.</summary>
     public static string ErrorCode(PieceLoadErrorCode c) => c switch
     {

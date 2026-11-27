@@ -32,7 +32,8 @@ Plano e motivos: `docs/research/painel-movel.md`.
 | `POST /api/pieces/{piece}/test` | pareado | `202 {opId}`; `403 test_not_allowed`; `409 audio_stopped` / `no_sample` |
 | `GET /api/operations/{opId}` | pareado | `200` operação; `404 operation_not_found` |
 
-Qualquer outra rota: `404 not_found`. `OPTIONS` (preflight CORS) e métodos não listados: `405 method_not_allowed`,
+Qualquer outra rota: `404 not_found`. `OPTIONS` (preflight CORS), `HEAD` e qualquer método além de `GET`/`POST`, em
+qualquer rota: `405 method_not_allowed`,
 **sem** cabeçalhos `Access-Control-*` (CORS negado).
 
 ### Arquivos estáticos
@@ -253,7 +254,9 @@ POST /api/pieces/kick/test
 - **A página só muda a seleção mostrada** depois de `applied` + `engineConfirmed: true`, ou `applied` com
   `audioRunning: false` — nunca de forma otimista. Em `failed`, mostra os `errors` e mantém a seleção anterior; em
   `superseded`, informa que um pedido mais novo venceu.
-- `errors[]`: `{ "piece": "snare" | null, "code": "...", "message": "texto pt-BR" }`. Códigos: `file_not_found`,
+- `errors[]`: `{ "piece": "snare" | null, "code": "...", "message": "texto pt-BR" }`. A `message` é curta, sem o nome
+  da peça (já está em `piece`) e no máximo com o **nome do arquivo** (ex.: `kick-c.wav`): nada fora do catálogo
+  (caminho absoluto, pastas do PC) chega ao celular em nenhuma resposta nem evento. Códigos: `file_not_found`,
   `unsupported_format`, `too_long`, `outside_library`, `io_error`, `invalid_argument`, `internal`.
 - `resultVersion`: `version` do estado que essa operação produziu (só em `applied`).
 - Operações do PC também podem ser consultadas pelo `opId` (com `clientOpId: null`); o histórico guarda as últimas 256.
