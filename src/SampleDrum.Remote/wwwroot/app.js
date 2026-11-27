@@ -197,7 +197,7 @@ function loadingFailed(text) {
 function readPairFragment() {
   const hash = location.hash || '';
   if (!/pair=/.test(hash)) return '';
-  const m = /[#&]pair=(\d{6})(?:&|$)/.exec(hash);
+  const m = /[#&]pair=(\d{8})(?:&|$)/.exec(hash);
   // Tira o código da barra de endereço (e do histórico) assim que lido.
   history.replaceState(null, '', location.pathname + location.search);
   return m ? m[1] : '';
@@ -226,8 +226,8 @@ async function onPairSubmit(ev) {
   ev.preventDefault();
   const code = ui.pairCode.value.replace(/\D/g, '');
   const name = ui.pairName.value.trim().slice(0, 40) || DEFAULT_NAME;
-  if (code.length !== 6) {
-    setPairMsg('Digite os 6 números que aparecem na tela do PC.', 'error');
+  if (code.length !== 8) {
+    setPairMsg('Digite os 8 números que aparecem na tela do PC.', 'error');
     ui.pairCode.focus();
     return;
   }
@@ -243,7 +243,7 @@ async function onPairSubmit(ev) {
       return;
     }
     if (r.status === 401) {
-      setPairMsg('Código errado ou vencido. Confira o código na tela do PC (vale 5 minutos).', 'error');
+      setPairMsg('Código errado, usado ou vencido. No PC, clique em Gerar novo código (vale 5 minutos).', 'error');
     } else if (r.status === 429) {
       const wait = retryAfter(r);
       setPairMsg(`Muitas tentativas erradas. Espere ${wait ? `${wait} s` : 'um pouco'} e confira o código na tela do PC.`, 'error');

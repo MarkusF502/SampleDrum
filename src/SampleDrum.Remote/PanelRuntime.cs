@@ -173,6 +173,8 @@ internal sealed class PanelRuntime : IDisposable
                 ctx.Response.Headers.RetryAfter = secs.ToString();
                 return Problem(429, "pairing_locked", "Muitas tentativas",
                     $"Muitas tentativas erradas. Espere {secs} s e confira o código no PC.", retryAfter: secs);
+            case PairingOutcome.Closed:
+                return Problem(401, "pairing_closed", "Pareamento fechado", "No PC, clique em Gerar novo código para parear este celular.");
             case PairingOutcome.Invalid:
                 Server.Write($"Painel: código de pareamento errado vindo de {who}.");
                 return Problem(401, "pairing_invalid", "Código inválido", "Código errado ou vencido. Confira o código no PC.");
@@ -268,7 +270,8 @@ internal sealed class PanelRuntime : IDisposable
             if (baseVersion > snap.Version || snap.Pieces[(int)p].SampleVersion > baseVersion)
                 return Stale(device.Name, $"{p.Label()} mudou depois da versão {baseVersion}. Confira e toque de novo.");
             if (!_limiter.TryAcquire(device.Key, out var wait)) return RateLimited(ctx, wait);
-            var op = Controller.SetPieceSample(p, body.SampleId);
+            var op = Controller.TrySetPieceSample(p, body.SampleId, baseVersion);
+            if (op is null) return Stale(device.Name, "Há uma troca nesta peça em andamento ou ela mudou. Confira e toque de novo.");
             var web = Operations.AddOrGet(new WebOp
             {
                 OpId = op.Id, ClientOpId = clientOpId, DeviceKey = device.Key, Kind = WebOpKind.PieceSample,
@@ -301,7 +304,8 @@ internal sealed class PanelRuntime : IDisposable
             if (baseVersion > snap.Version || snap.KitVersion > baseVersion)
                 return Stale(device.Name, $"O kit mudou depois da versão {baseVersion}. Confira e toque de novo.");
             if (!_limiter.TryAcquire(device.Key, out var wait)) return RateLimited(ctx, wait);
-            var op = Controller.ApplyPreset(preset);
+            var op = Controller.TryApplyPreset(preset, baseVersion);
+            if (op is null) return Stale(device.Name, "Há uma troca no kit em andamento ou ele mudou. Confira e toque de novo.");
             var web = Operations.AddOrGet(new WebOp
             {
                 OpId = op.Id, ClientOpId = clientOpId, DeviceKey = device.Key, Kind = WebOpKind.Preset,

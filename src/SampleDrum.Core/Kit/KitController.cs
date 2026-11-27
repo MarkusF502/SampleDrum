@@ -118,6 +118,37 @@ public sealed class KitController : IAsyncDisposable
     public KitOperation SetPieceSample(DrumPiece piece, string? sampleId) =>
         Enqueue(KitOperationKind.PieceSample, piece, sampleId, remoteId: true);
 
+    /// <summary>Atomically checks the phone's selection version and pending work before queuing. Null means conflict.</summary>
+    public KitOperation? TrySetPieceSample(DrumPiece piece, string sampleId, long baseVersion)
+    {
+        if (!piece.IsValid()) throw new ArgumentOutOfRangeException(nameof(piece));
+        lock (_gate)
+        {
+            if (!SelectionCurrent(baseVersion, piece)) return null;
+            return SetPieceSample(piece, sampleId);
+        }
+    }
+
+    /// <summary>Atomically refuses a stale phone preset or one overlapping a selection still preparing on the PC.</summary>
+    public KitOperation? TryApplyPreset(KitPreset preset, long baseVersion)
+    {
+        lock (_gate)
+        {
+            if (!SelectionCurrent(baseVersion, null)) return null;
+            return ApplyPreset(preset);
+        }
+    }
+
+    private bool SelectionCurrent(long version, DrumPiece? piece)
+    {
+        var state = Snapshot;
+        if (version < 0 || version > state.Version ||
+            (piece.HasValue ? state.Pieces[(int)piece.Value].SampleVersion : state.KitVersion) > version) return false;
+        return !_pending.Any(r => !r.Superseded && r.Failure is null &&
+            (r.Op.Snapshot.Kind is KitOperationKind.Preset or KitOperationKind.PreparedKit or KitOperationKind.LibraryFolder ||
+             r.Op.Snapshot.Kind == KitOperationKind.PieceSample && (!piece.HasValue || r.Op.Snapshot.Piece == piece)));
+    }
+
     /// <summary>Trusted PC picker path (absolute paths allowed); remote adapters must use SetPieceSample.</summary>
     public KitOperation SetPieceSamplePath(DrumPiece piece, string? samplePath) =>
         Enqueue(KitOperationKind.PieceSample, piece, samplePath);

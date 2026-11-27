@@ -23,6 +23,31 @@ public sealed class PanelControllerTests : IDisposable
     };
 
     [Fact]
+    public async Task PhoneCannotSupersedePendingPcSelection()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var engine = new KitEngine(Fs, KitSettings.Default);
+        var library = new SampleLibrary(_dir);
+        async Task<KitPrepareResult> Prepare(KitPreset p, int rate, CancellationToken ct)
+        { entered.TrySetResult(); await release.Task.WaitAsync(ct); return await library.PrepareAsync(p, rate, ct); }
+        await using var controller = new KitController(engine, library, Prepare);
+        var pc = controller.ApplyPreset(Preset("pc", "a.wav"));
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(15));
+        try
+        {
+            Assert.Null(controller.TrySetPieceSample(DrumPiece.Kick, "b.wav", 0));
+            Assert.Null(controller.TryApplyPreset(Preset("phone", "b.wav"), 0));
+        }
+        finally { release.TrySetResult(); }
+        Assert.Equal(KitOperationStatus.Applied, (await Done(pc)).Status);
+        Assert.Null(controller.TrySetPieceSample(DrumPiece.Kick, "b.wav", 0)); // stale even after pending work ends
+        var fresh = controller.TrySetPieceSample(DrumPiece.Kick, "b.wav", controller.Version);
+        Assert.NotNull(fresh);
+        Assert.Equal(KitOperationStatus.Applied, (await Done(fresh!)).Status);
+    }
+
+    [Fact]
     public async Task FailedPrepareKeepsKitAndSnapshot_VersionIncrementsOncePerAppliedOperation()
     {
         var engine = new KitEngine(Fs, KitSettings.Default);

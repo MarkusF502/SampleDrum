@@ -68,43 +68,45 @@ public class AuthTests
     }
 
     [Fact]
-    public void Code_ExpiresAfterFiveMinutes_IsInvalidatedAfterTenFailures_AndGlobalLimitLocksEveryone()
+    public void Pairing_ClosesOnExpirySuccessAndAttack_OnlyPcCanReopen()
     {
         var time = new ManualTime();
         var p = new PairingService(time);
-        string c1 = p.Code;
-        Assert.Equal(6, c1.Length);
+        var ip = IPAddress.Parse("192.168.0.20");
+        string first = p.Code;
+        Assert.Equal(8, first.Length);
         time.Advance(PairingService.Lifetime);
-        Assert.Equal(PairingOutcome.Invalid, p.TryPair(c1, IPAddress.Parse("192.168.0.20")).Outcome);   // expired
-        string c2 = p.Code;
-        Assert.NotEqual(c1, c2);
-
-        int changes = 0;
-        p.CodeChanged += (_, _) => changes++;
-        for (int i = 0; i < PairingService.MaxFailuresPerCode; i++)        // 10 failures from 10 different IPs
-            Assert.Equal(PairingOutcome.Invalid, p.TryPair(c2 == "999999" ? "999998" : "999999", IPAddress.Parse($"192.168.0.{30 + i}")).Outcome);
-        Assert.NotEqual(c2, p.Code);                                        // invalidated
-        Assert.True(changes >= 1);
-        Assert.Equal(PairingOutcome.Invalid, p.TryPair(c2, IPAddress.Parse("192.168.0.99")).Outcome);
-
-        for (int i = 0; i < PairingService.MaxFailuresGlobal; i++) p.TryPair("x", IPAddress.Parse($"10.0.{i}.1"));
-        var locked = p.TryPair(p.Code, IPAddress.Parse("10.1.1.1"));
-        Assert.Equal(PairingOutcome.Locked, locked.Outcome);
+        Assert.Equal(PairingOutcome.Closed, p.TryPair(first, ip).Outcome);
+        Assert.Equal("", p.Code);
+        time.Advance(TimeSpan.FromDays(1));
+        Assert.Equal("", p.Code); // neither time nor a remote request reopens pairing
+        string second = p.Regenerate();
+        Assert.Equal(PairingOutcome.Paired, p.TryPair(second, ip).Outcome);
+        Assert.Equal(PairingOutcome.Closed, p.TryPair(second, ip).Outcome);
+        string third = p.Regenerate();
+        for (int i = 0; i < PairingService.MaxFailuresPerCode; i++)
+            Assert.Equal(PairingOutcome.Invalid, p.TryPair("wrong", IPAddress.Parse($"192.168.0.{30+i}")).Outcome);
+        Assert.Equal(PairingOutcome.Closed, p.TryPair(third, ip).Outcome);
         time.Advance(PairingService.Window);
-        Assert.Equal(PairingOutcome.Paired, p.TryPair(p.Code, IPAddress.Parse("10.1.1.1")).Outcome);
-        Assert.NotEqual("", p.Regenerate());
+        Assert.Equal("", p.Code);
+        // Explicit PC action clears an attack's lockout and opens a fresh bounded window.
+        Assert.Equal(PairingOutcome.Paired, p.TryPair(p.Regenerate(), ip).Outcome);
     }
 
     [Fact]
-    public async Task ExpiredCode_OverHttp_Is401()
+    public async Task ExpiredCode_OverHttp_StaysClosedUntilPcGeneratesCode()
     {
         var time = new ManualTime();
         await using var h = await PanelTestHost.StartAsync(time: time);
         using var c = h.Client();
         string code = h.Server.Pairing.Code;
         time.Advance(TimeSpan.FromMinutes(5) + TimeSpan.FromSeconds(1));
-        Assert.Equal(HttpStatusCode.Unauthorized, (await c.PairAsync(code)).StatusCode);
-        Assert.Equal(HttpStatusCode.NoContent, (await c.PairAsync(h.Server.Pairing.Code)).StatusCode);
+        var expired = await c.PairAsync(code);
+        Assert.Equal(HttpStatusCode.Unauthorized, expired.StatusCode);
+        Assert.Equal("pairing_closed", (await expired.ProblemAsync()).Code);
+        Assert.Equal("", h.Server.Pairing.Code);
+        Assert.Equal(HttpStatusCode.NoContent, (await c.PairAsync(h.Server.Pairing.Regenerate())).StatusCode);
+        Assert.Equal("", h.Server.Pairing.Code);
     }
 
     [Theory]

@@ -8,6 +8,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>SampleDrum.App</RootNamespace>
     <AssemblyTitle>SampleDrum</AssemblyTitle>
+    <Version>0.3.0</Version>
   </PropertyGroup>
 
   <ItemGroup>

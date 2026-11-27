@@ -281,8 +281,15 @@ public sealed class RemotePanelControl : GroupBox
         }
         string code = _server.Pairing.Code;
         var left = _server.Pairing.Remaining;
-        _lblCode.Text = $"{code[..3]} {code[3..]}";
-        _lblExpires.Text = $"vence em {(int)left.TotalMinutes}:{left.Seconds:00} (depois troca sozinho)";
+        if (code.Length == 0)
+        {
+            _lblCode.Text = "Fechado";
+            _lblExpires.Text = "Clique em Gerar novo código para parear outro celular.";
+            SetQr(_server.Url);
+            return;
+        }
+        _lblCode.Text = $"{code[..4]} {code[4..]}";
+        _lblExpires.Text = $"vence em {(int)left.TotalMinutes}:{left.Seconds:00} (uso único)";
         SetQr(_server.Url is { } url ? $"{url}#pair={code}" : null);
     }
 

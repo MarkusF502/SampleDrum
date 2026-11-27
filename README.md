@@ -1,7 +1,7 @@
 # SampleDrum
 
 Reforço de bateria com samples, gratuito e independente (sem REAPER, Slate ou outra DAW), para o PC Windows da
-igreja que também roda o OBS Studio. Versão 2: **bumbo, caixa, tom e surdo**.
+igreja que também roda o OBS Studio. Versão 0.3: **bumbo, caixa, tom e surdo**, com painel de controle pelo celular.
 
 O SampleDrum recebe o microfone isolado de cada peça vindo da Behringer X32 pelo X-USB (ASIO, 48 kHz), detecta
 cada golpe e devolve **só o sample** daquela peça para a mesa, num retorno próprio. A equipe de som mistura os
@@ -47,6 +47,12 @@ samples com os microfones originais na mesa.
 - Para rodar: a **build self-contained** (não precisa instalar .NET) **ou** o .NET 10 Desktop Runtime.
 - Para compilar: .NET SDK 10 (testado com 10.0.401). `SampleDrum.Core` e o modo offline também compilam e
   rodam em Linux/WSL; o app (WinForms + NAudio.Asio) é só Windows.
+
+## Baixar PC e usar no celular
+
+Os pacotes estão nas [releases do GitHub](https://github.com/MarkusF502/SampleDrum/releases). Baixe o ZIP `win-x64`, extraia tudo e abra `SampleDrum.App.exe` (ou `Iniciar-simulacao.cmd` para a demonstração). O painel mobile já vem no aplicativo: abra pelo QR no navegador do celular. O ZIP `mobile-web` é uma cópia dos arquivos para desenvolvimento, não precisa instalá-lo no telefone.
+
+Validação e limites da versão: [docs/release-v0.3.0.md](docs/release-v0.3.0.md).
 
 ## Compilar, testar e rodar
 
@@ -157,9 +163,9 @@ desligado, o áudio e o kit ativo seguem como estão.
    - "Só este PC (localhost)" serve para testar no próprio PC. "Todas as redes (0.0.0.0)" existe, mas **não** é
      recomendado.
 2. O PC mostra o **endereço** (`http://<IP>:8750/`, também `http://<NOMEDOPC>.local:8750/`), um **QR code** e o
-   **código de pareamento** de 6 dígitos com a contagem regressiva. O código vale **5 minutos** e serve para **um**
-   celular; depois de usado, vencido ou após muitas tentativas erradas aparece outro (ou clique em **Gerar novo
-   código**).
+   **código de pareamento** de 8 dígitos com a contagem regressiva. O código vale **5 minutos** e serve para **um**
+   celular; depois de usado, vencido ou após 10 tentativas erradas, o pareamento fecha. Clique no PC em **Gerar novo
+   código** para abrir outra janela de 5 minutos. O acesso de celulares já pareados continua.
 3. No celular: leia o QR code (já leva o código) ou abra o endereço e digite o código. Pronto: o celular fica
    autorizado (um cookie seguro no navegador dele).
 4. **Celulares autorizados**: lista com nome, data do pareamento e último acesso. **Remover** tira o acesso daquele

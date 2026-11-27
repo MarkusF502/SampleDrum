@@ -51,11 +51,12 @@ qualquer rota: `405 method_not_allowed`,
 
 ### Código e QR
 
-- O PC mostra um **código de 6 dígitos** válido por **5 minutos**, a URL e um QR code com
+- O PC mostra um **código de 8 dígitos** válido por **5 minutos**, a URL e um QR code com
   `http://<IP>:<porta>/#pair=<código>`. A página lê `#pair=`, preenche o código e apaga o fragmento
   (`history.replaceState`). O fragmento nunca vai ao servidor.
-- O código é de **uso único**: depois de um pareamento certo, o PC mostra outro. Ele também é renovado quando vence,
-  pelo botão "Gerar novo código" e depois de **10 erros** com o mesmo código.
+- O código é de **uso único**: depois de um pareamento certo, vencimento ou **10 erros**, o pareamento fecha.
+  Somente o botão **Gerar novo código** no PC abre outra janela de 5 minutos (ou reativar o painel).
+  Ler o código e pedidos da rede nunca reabrem a janela. Celulares já pareados continuam conectados.
 
 ### `POST /api/pair`
 
@@ -65,14 +66,15 @@ Host: 192.168.0.10:8750
 Origin: http://192.168.0.10:8750
 Content-Type: application/json
 
-{"code":"123456","deviceName":"Celular do Lucas"}
+{"code":"12345678","deviceName":"Celular do Lucas"}
 ```
 
 - `204 No Content` + `Set-Cookie: sd_device=<token>; Max-Age=34560000; Path=/; HttpOnly; SameSite=Strict`.
 - `deviceName` opcional (até 40 caracteres; vazio vira "Celular"). Aparece na lista do PC.
-- `401 pairing_invalid`: código errado, vencido, ausente ou fora do formato (conta como tentativa errada).
+- `401 pairing_invalid`: código errado, ausente ou fora do formato (conta como tentativa errada).
+- `401 pairing_closed`: código já usado, vencido ou fechado após 10 erros. Gere outro no PC.
 - `429 pairing_locked` + `Retry-After: <segundos>`: 5 erros em 1 minuto vindos do mesmo IP bloqueiam esse IP até a
-  janela passar; 20 erros em 1 minuto (todos os IPs) bloqueiam o pareamento para todos.
+  janela passar. O limite global é 20/minuto; a janela fecha já no décimo erro e só uma ação no PC a reabre.
 - `409 too_many_devices`: já há 16 aparelhos pareados (remova algum no PC).
 
 ### Token e cookie
@@ -229,11 +231,12 @@ POST /api/pieces/kick/test
   - troca de peça: se o sample **dessa peça** mudou depois de `baseVersion` (`pieces[].sampleVersion > baseVersion`);
   - preset: se **qualquer** peça ou o preset ativo mudou depois de `baseVersion` (`kitVersion > baseVersion`);
   - `baseVersion` maior que o `version` atual (o app reiniciou): também `409 stale_state`.
+  - Trocas de seleção ainda na fila/preparação também dão `409`: peça se houver troca sobreposta; preset se houver qualquer troca. A checagem e a entrada na fila são atômicas no controlador.
   - Mudanças de ganho/ajustes/ativação feitas no PC **não** tornam o pedido velho.
 - Com `409 stale_state` a página mostra "alterado em outro dispositivo", atualiza a tela com o `state` recebido e só
   reenvia se o operador tocar de novo (com **novo** `clientOpId` e o novo `baseVersion`). Nunca reenvia sozinha.
-- Pedidos aceitos entram na fila única do PC (`KitController`). Um pedido mais novo para a mesma peça (ou um preset)
-  pode substituir um mais antigo ainda pendente: o antigo termina como `superseded`.
+- Pedidos aceitos entram na fila única do PC (`KitController`). Uma ação posterior no PC pode substituir
+  pedidos ainda pendentes: eles terminam como `superseded`. O celular não substitui seleções pendentes.
 
 ### `GET /api/operations/{opId}` e evento `op`
 

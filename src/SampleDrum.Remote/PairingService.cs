@@ -3,22 +3,21 @@ using System.Security.Cryptography;
 
 namespace SampleDrum.Remote;
 
-public enum PairingOutcome { Paired, Invalid, Locked }
+public enum PairingOutcome { Paired, Invalid, Locked, Closed }
 
 /// <summary>Result of one pairing attempt; <see cref="RetryAfter"/> is set when <see cref="Outcome"/> is Locked.</summary>
 public readonly record struct PairingResult(PairingOutcome Outcome, TimeSpan RetryAfter = default);
 
 /// <summary>
-/// Temporary 6-digit pairing code shown on the PC. Valid for <see cref="Lifetime"/>, single use (a new code after
-/// each successful pairing), renewed when it expires, on demand, and after <see cref="MaxFailuresPerCode"/> wrong
-/// attempts. Attempt limits: <see cref="MaxFailuresPerIp"/> wrong codes per IP per <see cref="Window"/> lock that IP
-/// for the rest of the window; <see cref="MaxFailuresGlobal"/> wrong codes in a window lock pairing for everyone.
+/// PC-opened, single-use 8-digit pairing window. Reading the code or making network requests never reopens it.
+/// Expiry, success or ten failures close the window; only Regenerate on the PC opens another five minutes.
 /// Thread-safe. The code is compared in constant time.
 /// </summary>
 public sealed class PairingService
 {
     public static readonly TimeSpan Lifetime = TimeSpan.FromMinutes(5);
     public static readonly TimeSpan Window = TimeSpan.FromMinutes(1);
+    public const int CodeLength = 8;
     public const int MaxFailuresPerIp = 5;
     public const int MaxFailuresPerCode = 10;
     public const int MaxFailuresGlobal = 20;
@@ -40,7 +39,7 @@ public sealed class PairingService
     /// <summary>The code changed (renewed, used, expired or invalidated). Raised outside the lock.</summary>
     public event EventHandler? CodeChanged;
 
-    /// <summary>Current code (renewed first if expired).</summary>
+    /// <summary>Current code, or empty when pairing is closed.</summary>
     public string Code { get { EnsureFresh(); lock (_gate) return _code; } }
 
     public DateTimeOffset ExpiresAt { get { EnsureFresh(); lock (_gate) return _expiresAt; } }
@@ -58,12 +57,17 @@ public sealed class PairingService
     public string Regenerate()
     {
         string code;
-        lock (_gate) code = NewCodeLocked();
+        lock (_gate)
+        {
+            _failures.Clear();
+            _failuresByIp.Clear();
+            code = NewCodeLocked();
+        }
         RaiseChanged();
         return code;
     }
 
-    /// <summary>Checks a code from <paramref name="remote"/>; on success the code is consumed (a new one is shown).</summary>
+    /// <summary>Checks a code from <paramref name="remote"/>; on success the window closes.</summary>
     public PairingResult TryPair(string? code, IPAddress? remote)
     {
         EnsureFresh();
@@ -72,6 +76,7 @@ public sealed class PairingService
         lock (_gate)
         {
             var now = _time.GetUtcNow();
+            if (_code.Length == 0) return new PairingResult(PairingOutcome.Closed);
             string ip = remote?.ToString() ?? "local";
             Prune(_failures, now);
             var mine = _failuresByIp.TryGetValue(ip, out var q) ? q : null;
@@ -82,10 +87,10 @@ public sealed class PairingService
             if (mine is { Count: >= MaxFailuresPerIp })
                 return new PairingResult(PairingOutcome.Locked, mine.Peek() + Window - now);
 
-            if (code is { Length: 6 } && code.All(char.IsAsciiDigit) &&
+            if (code is { Length: CodeLength } && code.All(char.IsAsciiDigit) &&
                 CryptographicOperations.FixedTimeEquals(System.Text.Encoding.ASCII.GetBytes(code), System.Text.Encoding.ASCII.GetBytes(_code)))
             {
-                NewCodeLocked();
+                _code = "";
                 _failuresByIp.Remove(ip);
                 result = new PairingResult(PairingOutcome.Paired);
                 changed = true;
@@ -95,7 +100,7 @@ public sealed class PairingService
                 if (mine is null) _failuresByIp[ip] = mine = new Queue<DateTimeOffset>();
                 mine.Enqueue(now);
                 _failures.Enqueue(now);
-                if (++_failuresOnCode >= MaxFailuresPerCode) { NewCodeLocked(); changed = true; }
+                if (++_failuresOnCode >= MaxFailuresPerCode) { _code = ""; changed = true; }
                 // Keep the dictionary bounded: forget IPs without recent failures.
                 if (_failuresByIp.Count > 256)
                     foreach (var k in _failuresByIp.Where(kv => { Prune(kv.Value, now); return kv.Value.Count == 0; })
@@ -113,7 +118,7 @@ public sealed class PairingService
         bool renewed = false;
         lock (_gate)
         {
-            if (_time.GetUtcNow() >= _expiresAt) { NewCodeLocked(); renewed = true; }
+            if (_code.Length > 0 && _time.GetUtcNow() >= _expiresAt) { _code = ""; renewed = true; }
         }
         if (renewed) RaiseChanged();
     }
@@ -121,7 +126,7 @@ public sealed class PairingService
     private string NewCodeLocked()
     {
         string next;
-        do next = RandomNumberGenerator.GetInt32(0, 1_000_000).ToString("D6");
+        do next = RandomNumberGenerator.GetInt32(0, 100_000_000).ToString("D8");
         while (next == _code);
         _code = next;
         _expiresAt = _time.GetUtcNow() + Lifetime;

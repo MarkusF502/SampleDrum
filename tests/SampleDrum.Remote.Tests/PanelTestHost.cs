@@ -124,7 +124,7 @@ public sealed class PanelTestHost : IAsyncDisposable
     public async Task<PanelClient> PairedClientAsync(string name = "Celular teste")
     {
         var c = Client();
-        var r = await c.PairAsync(Server.Pairing.Code, name);
+        var r = await c.PairAsync(Server.Pairing.Regenerate(), name);
         Assert.Equal(HttpStatusCode.NoContent, r.StatusCode);
         return c;
     }

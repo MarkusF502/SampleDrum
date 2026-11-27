@@ -24,7 +24,7 @@ Data: 2026-11-25; atualizado em 2026-11-26 para o Core em `ao/sampledrum-core/ro
 - **Servidor:** Kestrel (ASP.NET Core minimal APIs) **dentro do processo** do app, em um projeto novo `SampleDrum.Remote`.
 - **Rede:** ouve só no(s) IP(s) da LAN e no loopback, porta fixa **8750** (configurável).
 - **Comunicação:** **SSE** para o estado ao vivo e **POST JSON** para os comandos. Página HTML/JS sem framework, embutida no exe.
-- **Acesso:** **HTTP + pareamento** (código de 6 dígitos ou QR na tela do PC), token de aparelho em cookie `HttpOnly; SameSite=Strict`, checagem de Origin/Host, limite de tentativas e lista de aparelhos revogáveis no PC.
+- **Acesso:** **HTTP + pareamento** (código de 8 dígitos ou QR na tela do PC), token de aparelho em cookie `HttpOnly; SameSite=Strict`, checagem de Origin/Host, limite de tentativas e lista de aparelhos revogáveis no PC.
 - **Lógica:** um **`KitController` único** (fonte única de verdade, com número de versão do estado) serializa as trocas. O PC e o celular usam o mesmo caminho: `SampleLibrary.PrepareAsync`, depois `KitEngine.ApplyKit`, que troca atomicamente na fronteira de bloco.
 
 ## 1. Como hospedar o painel
@@ -88,14 +88,14 @@ Os comandos são raros (trocar sample, aplicar preset), então **POST + SSE** ba
   - Firewall `LocalSubnet` (seção 2).
   - O app recusa IPs remotos fora das sub-redes das interfaces escolhidas (defesa em profundidade).
   - Checagem do cabeçalho `Host`: só aceita `IP:8750`, `NOMEDOPC.local:8750` e `localhost`. Isso bloqueia *DNS rebinding* [inferência].
-- **Pareamento (primeira conexão):** o PC mostra, num quadro **não modal**, um código de 6 dígitos válido por 5 minutos, também embutido no QR (`http://IP:8750/#pair=123456`).
+- **Pareamento (primeira conexão):** o PC mostra, num quadro **não modal**, um código de 8 dígitos válido por 5 minutos, também embutido no QR (`http://IP:8750/#pair=12345678`).
   - Um "Aprovar este celular?" modal roubaria o foco do operador do OBS durante o culto, por isso **não** é recomendado.
   - O celular envia `POST /api/pair {code, deviceName}` e recebe um token aleatório de 256 bits num **cookie `HttpOnly; SameSite=Strict; Path=/`** (o `EventSource` envia cookies sozinho; cabeçalho customizado não dá) [fonte MDN].
   - O PC guarda só o **hash SHA-256** do token, com nome do aparelho, data de pareamento e último acesso.
 - **Revogação:** lista "Celulares autorizados" no PC com um botão "Remover"; o efeito é imediato e a conexão SSE desse aparelho é fechada. Há também a opção "Remover todos".
 - **CSRF:** cookie `SameSite=Strict`, `Origin` obrigatório e igual a um host permitido em todo POST, e corpo `application/json` obrigatório (POST cruzado exige *preflight*, que o servidor nega) [fonte OWASP].
 - **Limite de tentativas** (rate limiting nativo do ASP.NET Core) [fonte]:
-  - `/api/pair`: 5 tentativas por minuto por IP; após 10 erros, o código é invalidado e o PC gera outro.
+  - `/api/pair`: 5 tentativas por minuto por IP; após 10 erros, uso ou vencimento, o pareamento fecha; **Gerar novo código** no PC abre outra janela.
   - Comandos: 5 por segundo por aparelho.
   - `/api/events`: no máximo 4 conexões por aparelho.
 - **HTTPS ou HTTP:**
@@ -145,7 +145,7 @@ Exemplo de `state`:
 4. `KitEngine.ApplyKit` faz **uma troca de referência**, que vale no **início do próximo bloco**. Os golpes seguintes usam o sample novo e as vozes que já tocam terminam com o antigo. Sample rate diferente → `Failed`, motor intacto. `Applied` quer dizer "entregue ao motor" (também com o áudio parado); a confirmação de que a thread de áudio pegou a troca é `KitEngine.AppliedKitGeneration`. `Reset()` aplica um kit pendente. Ganhos e detecção do preset entram **por cima da calibração atual**, e duas trocas antes de um bloco não perdem ganhos [fonte; observação: re-check final].
 5. Cada operação aplicada incrementa `Version` uma vez e dispara `StateChanged` (sem argumentos, na thread do worker, fora de locks); quem escuta lê `Snapshot` (`KitStateSnapshot`: `Version`, `KitEnabled`, `ActivePresetId`, por peça `SampleId`, `SamplePath`, ganho, `Enabled`, `Settings`).
 6. **Concorrência:** fila serial; o *supersede* é **direcional**: troca de kit inteiro cancela trocas de kit e de peça mais antigas; troca de peça cancela só trocas antigas da **mesma** peça (nunca um preset pendente); habilitar/ganho/ajustes/kit-ativo cancelam o mesmo tipo para o mesmo alvo. O cancelado nunca chega ao motor, mesmo se já estava preparando.
-   - `baseVersion` e `clientOpId` **não existem no Core**: ficam no adaptador web (seção 9). `baseVersion` não bloqueia; se estiver velho, a resposta leva `conflict: true` e o celular mostra "alterado por outro dispositivo" [inferência: travar seria pior ao vivo].
+   - `baseVersion` e `clientOpId` **não existem no Core**: ficam no adaptador web (seção 9). `baseVersion` antigo ou seleção sobreposta ainda em preparação são recusados com `409 stale_state`; o celular atualiza a tela e pede novo toque.
 7. **Pedidos inválidos** (ajustes sem `Trigger`, ganho não finito, id fora da biblioteca) viram `Failed` com código estável (`InvalidArgument`, `OutsideLibrary`); exceção inesperada vira `Failed`/`Internal` e o worker continua [observação: re-check final].
 8. **Partida do app:** o kit salvo volta como **uma** operação de kit inteiro só com samples (`AppConfig.ToStartupPreset`), mantendo o `ActivePresetId` se as peças ainda batem com o arquivo do preset, **antes** de o áudio começar. O kit continua começando **desativado**.
 9. **Memória e GC:** um kit de 4 samples de ~1 s ocupa ~0,8 MB, que vai para o LOH. Kits antigos ficam para o GC quando as vozes terminam. **Risco:** pausa de GC gen2 durante uma troca. Medir com o harness; mitigação possível: `GCSettings.LatencyMode = SustainedLowLatency` enquanto o áudio roda [inferência].

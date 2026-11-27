@@ -92,6 +92,7 @@ public sealed class PanelServer : IAsyncDisposable
                 try { await app.DisposeAsync().ConfigureAwait(false); } catch { }
                 throw Translate(ex, options);
             }
+            Pairing.Regenerate(); // Starting the panel is an explicit PC action.
             runtime.Start();
             _runtime = runtime;
             _app = app;
