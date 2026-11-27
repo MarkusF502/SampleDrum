@@ -44,7 +44,7 @@ b { font-weight: 700; }
 
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 
-/* ---------- cabeçalho ---------- */
+/* cabeçalho */
 .top {
   position: sticky; top: 0; z-index: 5;
   background: var(--bg);
@@ -88,7 +88,7 @@ b { font-weight: 700; }
 }
 .banner-sub { display: block; font-size: .9rem; color: #ffc4c4; margin-top: 2px; }
 
-/* ---------- layout ---------- */
+/* layout */
 main { max-width: 920px; margin: 0 auto; padding: 12px max(12px, env(safe-area-inset-right)) 24px max(12px, env(safe-area-inset-left)); }
 .view.center { min-height: 50vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; }
 
@@ -99,7 +99,7 @@ main { max-width: 920px; margin: 0 auto; padding: 12px max(12px, env(safe-area-i
   padding: 14px;
 }
 
-/* ---------- formulários e botões ---------- */
+/* formulários e botões */
 .form { display: flex; flex-direction: column; gap: 8px; margin-top: 16px; max-width: 28rem; }
 label { font-weight: 600; font-size: 1rem; }
 .form label { margin-top: 8px; }
@@ -135,13 +135,13 @@ label { font-weight: 600; font-size: 1rem; }
 .msg.error { color: var(--err); }
 .msg.ok { color: var(--ok); }
 
-/* ---------- preset ---------- */
+/* preset */
 .preset label { display: block; margin-bottom: 8px; }
 .preset-row { display: flex; flex-wrap: wrap; gap: 10px; }
 .preset-row .select { flex: 1 1 12rem; }
 .preset-row .btn { flex: 1 0 9rem; }
 
-/* ---------- status de operação ---------- */
+/* status de operação */
 .op-status { min-height: 1.4em; margin: 8px 0 0; font-weight: 700; font-size: 1rem; overflow-wrap: anywhere; }
 .op-status:empty { display: none; }
 .st-busy { color: var(--accent); }
@@ -153,7 +153,7 @@ label { font-weight: 600; font-size: 1rem; }
 .st-error { color: var(--err); }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* ---------- peças ---------- */
+/* peças */
 .pieces { display: grid; grid-template-columns: 1fr; gap: 12px; margin-top: 12px; }
 @media (min-width: 600px) { .pieces { grid-template-columns: 1fr 1fr; } }
 
@@ -190,7 +190,7 @@ label { font-weight: 600; font-size: 1rem; }
 .foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px;
   margin-top: 20px; color: var(--muted); font-size: .95rem; }
 
-/* ---------- lista de samples (tela cheia) ---------- */
+/* lista de samples (tela cheia) */
 .sheet {
   position: fixed; inset: 0; z-index: 20;
   display: flex; flex-direction: column;
@@ -216,7 +216,7 @@ label { font-weight: 600; font-size: 1rem; }
 .sample-item .now { font-size: .85rem; font-weight: 700; color: var(--ok); white-space: nowrap; }
 .empty { color: var(--muted); padding: 16px 4px; }
 
-/* ---------- confirmação ---------- */
+/* confirmação */
 .modal {
   position: fixed; inset: 0; z-index: 30;
   display: flex; align-items: center; justify-content: center;
@@ -228,7 +228,7 @@ label { font-weight: 600; font-size: 1rem; }
 .modal-actions { display: flex; flex-wrap: wrap; gap: 10px; }
 .modal-actions .btn { flex: 1 1 8rem; }
 
-/* ---------- aviso rápido ---------- */
+/* aviso rápido */
 .toast {
   position: fixed; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom)); z-index: 40;
   transform: translateX(-50%); width: max-content; max-width: calc(100% - 24px);
