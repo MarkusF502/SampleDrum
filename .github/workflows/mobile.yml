@@ -74,7 +74,10 @@ jobs:
         working-directory: mobile/ios
         run: |
           SIMULATOR=$(xcrun simctl list devices available -j | python3 -c 'import json,sys; d=json.load(sys.stdin); print(next(v["udid"] for values in d["devices"].values() for v in values if v["name"].startswith("iPhone")))')
-          xcodebuild -project SampleDrumMobile.xcodeproj -scheme SampleDrumMobile -destination "id=$SIMULATOR" -derivedDataPath build -resultBundlePath build/UITests.xcresult CODE_SIGNING_ALLOWED=NO test
+          xcrun simctl boot "$SIMULATOR" || true
+          xcrun simctl bootstatus "$SIMULATOR" -b
+          xcodebuild -project SampleDrumMobile.xcodeproj -scheme SampleDrumMobile -destination "id=$SIMULATOR" -parallel-testing-enabled NO -derivedDataPath build -resultBundlePath build/UITests.xcresult CODE_SIGNING_ALLOWED=NO test
+          xcrun simctl install "$SIMULATOR" build/Build/Products/Debug-iphonesimulator/SampleDrumMobile.app
           xcrun simctl launch "$SIMULATOR" com.markusf502.sampledrum
           sleep 2
           xcrun simctl io "$SIMULATOR" screenshot build/launcher.png
