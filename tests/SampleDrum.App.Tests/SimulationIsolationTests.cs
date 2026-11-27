@@ -7,6 +7,10 @@ using SampleDrum.App.Harness;
 using SampleDrum.Core.Kit;
 using SampleDrum.Remote;
 
+// MainForm and the harness tests share process-wide statics (StartupOptions.SimulationMode, SimulationLibraryRoot,
+// the simulation library, MainForm.SettingsPath): run this assembly's tests one at a time.
+[assembly: CollectionBehavior(DisableTestParallelization = true)]
+
 namespace SampleDrum.App.Tests;
 
 /// <summary>
@@ -44,8 +48,11 @@ public class SimulationIsolationTests
 
         string previousPath = MainForm.SettingsPath;
         bool previousSim = StartupOptions.SimulationMode;
+        string previousRoot = StartupOptions.SimulationLibraryRoot;
+        string libraryRoot = Path.Combine(dir, "biblioteca-simulacao");
         MainForm.SettingsPath = settings;
         StartupOptions.SimulationMode = true;
+        StartupOptions.SimulationLibraryRoot = libraryRoot;
         Exception? failure = null;
         var thread = new Thread(() =>
         {
@@ -75,13 +82,14 @@ public class SimulationIsolationTests
         {
             MainForm.SettingsPath = previousPath;
             StartupOptions.SimulationMode = previousSim;
+            StartupOptions.SimulationLibraryRoot = previousRoot;
         }
         if (failure is not null) throw new Xunit.Sdk.XunitException("session failed: " + failure);
 
         if (createSettings) Assert.Equal(before, File.ReadAllBytes(settings));
         else Assert.False(File.Exists(settings), "a --simulation run created settings.json");
         Assert.Empty(Directory.EnumerateFiles(dir, "*.tmp"));
-        Assert.False(Directory.Exists(StartupOptions.SimulationLibraryRoot), "simulation library not cleaned up");
+        Assert.False(Directory.Exists(libraryRoot), "simulation library not cleaned up");
         Directory.Delete(dir, true);
     }
 
