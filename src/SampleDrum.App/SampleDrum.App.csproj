@@ -18,6 +18,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\SampleDrum.Core\SampleDrum.Core.csproj" />
+    <ProjectReference Include="..\SampleDrum.Remote\SampleDrum.Remote.csproj" />
   </ItemGroup>
 
 </Project>

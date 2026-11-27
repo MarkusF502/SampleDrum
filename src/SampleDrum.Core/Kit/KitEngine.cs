@@ -96,14 +96,17 @@ public sealed class KitEngine : IMultiChannelProcessor
     /// effective at the next block start: no block ever plays a mix of two kits. Voices already playing finish with
     /// their old sample; new hits use the new kit. A single-piece change is a kit with one piece replaced
     /// (<see cref="PreparedKit.WithPiece"/>). Call off the audio thread.
+    /// Returns the generation of this swap: the audio thread has taken it once
+    /// <see cref="AppliedKitGeneration"/> &gt;= that value.
     /// </summary>
-    public void ApplyKit(PreparedKit kit)
+    public long ApplyKit(PreparedKit kit)
     {
         ArgumentNullException.ThrowIfNull(kit);
         if (kit.SampleRate != SampleRate)
             throw new ArgumentException($"Kit preparado a {kit.SampleRate} Hz; o motor roda a {SampleRate} Hz.", nameof(kit));
 
         var parms = new EngineParams?[DrumPieces.Count];
+        long generation;
         lock (_settingsLock)
         {
             foreach (var p in DrumPieces.All)
@@ -121,9 +124,14 @@ public sealed class KitEngine : IMultiChannelProcessor
                 parms[i] = BuildParams(s);
             }
             Volatile.Write(ref _submittedKit, kit);
-            Volatile.Write(ref _pendingKit, new KitSwap(kit, parms, Interlocked.Increment(ref _seq), ++_kitGeneration));
+            generation = Interlocked.Increment(ref _kitGeneration);
+            Volatile.Write(ref _pendingKit, new KitSwap(kit, parms, Interlocked.Increment(ref _seq), generation));
         }
+        return generation;
     }
+
+    /// <summary>Generation of the last kit passed to <see cref="ApplyKit"/> (taken or not by the audio thread yet).</summary>
+    public long SubmittedKitGeneration => Interlocked.Read(ref _kitGeneration);
 
     /// <summary>The kit in effect from the next block on (last kit passed to <see cref="ApplyKit"/>), or null.</summary>
     public PreparedKit? ActiveKit => Volatile.Read(ref _submittedKit);
