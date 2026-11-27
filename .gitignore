@@ -11,3 +11,15 @@ selftest.txt
 harness.txt
 drivers.txt
 sd-teste/
+**/.gradle/
+**/build/
+**/local.properties
+**/.signing/
+*.jks
+*.keystore
+*.apk
+*.ipa
+**/.build/
+**/*.xcodeproj/
+**/Info.plist
+mobile/ios/SampleDrumMobile-ios-simulator.zip
