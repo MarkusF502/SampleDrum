@@ -27,7 +27,19 @@ if (!(Test-Path -LiteralPath $key)) {
 }
 if (!(Test-Path -LiteralPath $passwordFile)) { throw 'Signing password missing. Restore the signing backup.' }
 $aligned = "$OutputApk.aligned"
-& $align -f -P 16 4 $InputApk $aligned
+# Keep upstream license notices in APKs built before the asset was introduced, too.
+$staged = "$OutputApk.unsigned"
+Copy-Item -LiteralPath $InputApk -Destination $staged
+$notices = Join-Path $PSScriptRoot '../mobile/android/app/src/main/assets/THIRD_PARTY_NOTICES.txt'
+if (Test-Path -LiteralPath $notices) {
+    $archive = [IO.Compression.ZipFile]::Open($staged, [IO.Compression.ZipArchiveMode]::Update)
+    try {
+        $entry = $archive.GetEntry('assets/THIRD_PARTY_NOTICES.txt')
+        if ($entry) { $entry.Delete() }
+        [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $notices, 'assets/THIRD_PARTY_NOTICES.txt') | Out-Null
+    } finally { $archive.Dispose() }
+}
+& $align -f -P 16 4 $staged $aligned
 if ($LASTEXITCODE -ne 0) { throw 'APK alignment failed.' }
 & $java -jar $signer sign --ks $key --ks-key-alias sampledrum --ks-pass "file:$passwordFile" --out $OutputApk $aligned
 if ($LASTEXITCODE -ne 0) { throw 'APK signing failed.' }
@@ -36,4 +48,5 @@ if ($LASTEXITCODE -ne 0) { throw 'APK signature verification failed.' }
 & $align -c -P 16 4 $OutputApk
 if ($LASTEXITCODE -ne 0) { throw 'Signed APK alignment verification failed.' }
 Remove-Item -LiteralPath $aligned
+Remove-Item -LiteralPath $staged
 Write-Output "Signed APK: $OutputApk"
