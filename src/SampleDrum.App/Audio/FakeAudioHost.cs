@@ -39,6 +39,9 @@ public sealed class FakeAudioHost : IAudioHost
     private SortedDictionary<int, float[]>? _capturePhysical;
     private int _captureLength;
     private long _captured;
+    private PreparedKit?[]? _blockKits;
+    private long[]? _blockGens;
+    private int _blockRecords;
 
     /// <summary>v2: multi-channel host. <paramref name="routing"/> = validated piece → USB index mapping.</summary>
     public FakeAudioHost(IMultiChannelProcessor processor, ResolvedRouting routing, FakeHostOptions? options = null)
@@ -124,6 +127,13 @@ public sealed class FakeAudioHost : IAudioHost
         if (capture > 0)
         {
             _captureLength = capture;
+            if (RecordKitPerBlock is not null)
+            {
+                int blocks = capture / _options.BlockSize + 2;
+                _blockKits = new PreparedKit?[blocks];
+                _blockGens = new long[blocks];
+            }
+            _blockRecords = 0;
             _captureByPiece = Enumerable.Range(0, DrumPieces.Count).Select(_ => new float[capture]).ToArray();
             _capturePhysical = new SortedDictionary<int, float[]>();
             foreach (var p in DrumPieces.All)
@@ -162,6 +172,21 @@ public sealed class FakeAudioHost : IAudioHost
     }
 
     /// <summary>Captured routed returns (once stopped): by piece and by desk output channel. Null without capture.</summary>
+    /// <summary>
+    /// Harness only: set before <see cref="Start"/> (with <see cref="FakeHostOptions.CaptureSeconds"/> &gt; 0). After every
+    /// processed block the host records this engine's <c>PlayingKit</c> and <c>AppliedKitGeneration</c> into preallocated
+    /// arrays (no allocation on the processing thread). Read them with <see cref="GetBlockRecord"/>.
+    /// </summary>
+    public KitEngine? RecordKitPerBlock { get; set; }
+
+    /// <summary>Per-block kit record (see <see cref="RecordKitPerBlock"/>), once stopped; null otherwise.</summary>
+    public (PreparedKit?[] Kits, long[] Generations)? GetBlockRecord()
+    {
+        if (_blockKits is null || _blockGens is null || _running) return null;
+        int n = Volatile.Read(ref _blockRecords);
+        return (_blockKits[..n], _blockGens[..n]);
+    }
+
     public (float[][] ByPiece, SortedDictionary<int, float[]> Physical, int Frames)? GetCapture()
     {
         if (_captureByPiece is null || _capturePhysical is null || _running) return null;
@@ -277,6 +302,12 @@ public sealed class FakeAudioHost : IAudioHost
 
                     for (int i = 0; i < n4; i++) routedOut[i] = outIdx[i] is not null ? outputs[i] : silent;
                     MeterAndCapture(outputs, outIdx, block);
+                    if (_blockKits is not null && RecordKitPerBlock is { } rec && _blockRecords < _blockKits.Length)
+                    {
+                        _blockKits[_blockRecords] = rec.PlayingKit;
+                        _blockGens![_blockRecords] = rec.AppliedKitGeneration;
+                        Volatile.Write(ref _blockRecords, _blockRecords + 1);
+                    }
                     if (_previewEnabled && _player is { } player)
                     {
                         var pv = _preview;

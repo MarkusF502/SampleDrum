@@ -20,6 +20,7 @@ internal static class SelfTest
         results.Add(HarnessChecks.Safe("Conversão float <-> formatos nativos ASIO (Int32/Float32/Int16/Int24 LSB, com saturação)", CheckConverters));
         results.AddRange(HarnessChecks.RunAll(Path.GetTempPath()));
         results.AddRange(RealtimeChecks.RunAll(speed: 4.0));
+        results.AddRange(SwapChecks());
 
         foreach (var r in results)
         {
@@ -30,6 +31,36 @@ internal static class SelfTest
         Console.WriteLine($"{results.Count - failed}/{results.Count} verificações OK em {sw.Elapsed.TotalSeconds:0.0} s");
         Console.WriteLine(failed == 0 ? "RESULTADO: OK" : "RESULTADO: FALHOU");
         return failed == 0 ? 0 : 1;
+    }
+
+    /// <summary>Swap verification (same as --harness --swap): offline and through the running simulation host.</summary>
+    private static IEnumerable<CheckResult> SwapChecks()
+    {
+        string root = Path.Combine(Path.GetTempPath(), "SampleDrum-selftest-trocas-" + Guid.NewGuid().ToString("N")[..8]);
+        try
+        {
+            var lib = SimulationSampleLibrary.Create(root);
+            var o = new SwapOptions();
+            CheckResult Run(string name, Func<SwapRecording> run) => HarnessChecks.Safe(name, () =>
+            {
+                var rep = SwapHarness.Analyze(run(), o);
+                var failed = rep.Checks.Where(c => !c.Passed).ToList();
+                return (rep.Passed, failed.Count == 0
+                    ? $"{rep.Checks.Count} verificações OK, {rep.Voices.Count} golpes identificados no áudio"
+                    : string.Join("; ", failed.Select(c => $"{c.Name}: {c.Detail}")));
+            });
+            return
+            [
+                Run("Troca de sample/preset durante o áudio (offline): peça, preset no mesmo bloco, preset com erro sem mudança",
+                    () => SwapHarness.RunOfflineAsync(lib, o).GetAwaiter().GetResult()),
+                Run("Troca de sample/preset com o host de simulação rodando (velocidade 8x), sem reiniciar o áudio",
+                    () => SwapCommand.RunRealtimeAsync(lib, o, 8.0).GetAwaiter().GetResult()),
+            ];
+        }
+        finally
+        {
+            try { Directory.Delete(root, true); } catch { /* best effort */ }
+        }
     }
 
     private static (bool, string) CheckConverters()
