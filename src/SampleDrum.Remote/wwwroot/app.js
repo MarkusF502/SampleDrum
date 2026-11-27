@@ -44,6 +44,9 @@
     latest: {},            // alvo ('kit' ou peça) -> clientOpId do pedido mais recente
     status: {},            // alvo -> { text, kind, timer }
     cards: {},             // peça -> elementos do cartão
+    shown: {},             // peça -> sample mostrado (segurado enquanto há pedido deste aparelho em andamento)
+    shownKit: undefined,
+    lastAuthCheck: 0,
     picker: null,          // { piece, baseVersion }
     confirmResolve: null,
     toastTimer: 0,
@@ -84,7 +87,7 @@
         const text = await res.text();
         if (text) { try { data = JSON.parse(text); } catch { data = null; } }
       }
-      return { status: res.status, ok: res.ok, data };
+      return { status: res.status, ok: res.ok, data, retryAfter: res.headers.get('Retry-After') };
     } catch (e) {
       throw new NetError(e && e.name === 'AbortError' ? 'timeout' : 'network');
     } finally {
@@ -101,6 +104,11 @@
   function problemCode(r) {
     const d = r && r.data;
     return d && typeof d === 'object' && typeof d.code === 'string' ? d.code : '';
+  }
+
+  function retryAfter(r) {
+    const v = Number((r.data && r.data.retryAfterSeconds) || r.retryAfter);
+    return isFinite(v) && v > 0 ? Math.ceil(v) : 0;
   }
 
   function parse(text) {
@@ -239,7 +247,10 @@
       if (r.status === 401) {
         setPairMsg('Código errado ou vencido. Confira o código na tela do PC (vale 5 minutos).', 'error');
       } else if (r.status === 429) {
-        setPairMsg('Muitas tentativas erradas. Espere um pouco e gere um código novo no PC.', 'error');
+        const wait = retryAfter(r);
+        setPairMsg(`Muitas tentativas erradas. Espere ${wait ? `${wait} s` : 'um pouco'} e confira o código na tela do PC.`, 'error');
+      } else if (r.status === 409 && problemCode(r) === 'too_many_devices') {
+        setPairMsg('O PC já tem o máximo de celulares pareados. Remova algum na lista do PC e tente de novo.', 'error');
       } else if (r.status === 403) {
         setPairMsg('O PC recusou este endereço. Abra o painel pelo endereço ou QR code mostrado no PC.', 'error');
       } else {
@@ -294,7 +305,9 @@
     if (!s || app.view !== 'main') return;
 
     const kit = s.kit || {};
-    ui.kitName.textContent = kit.presetId ? (kit.name || presetName(kit.presetId) || kit.presetId) : 'Personalizado';
+    const kitName = kit.presetId ? (kit.name || presetName(kit.presetId) || kit.presetId) : 'Personalizado';
+    if (!holding('kit') || app.shownKit === undefined) app.shownKit = kitName;
+    ui.kitName.textContent = app.shownKit;
 
     const sim = s.simulation === true || /simula/i.test(s.profile || '');
     ui.profile.textContent = s.profile || (sim ? 'Simulação' : 'Igreja');
@@ -314,6 +327,15 @@
       if (!byId[id]) app.cards[id].root.hidden = true;
     }
     if (app.picker) renderPickerList();
+  }
+
+  // Pedido deste aparelho ainda sem desfecho (inclusive aplicado e ainda não confirmado pelo áudio): a seleção mostrada
+  // fica como estava até o fim, porque o `state` pode trazer a troca antes de `engineConfirmed` (contrato, seção 6).
+  function holding(target) {
+    for (const rec of app.ops.values()) {
+      if (!rec.done && rec.kind !== 'test' && (target === 'kit' || rec.kind === 'preset' || rec.target === target)) return true;
+    }
+    return false;
   }
 
   function ensureCard(id) {
@@ -351,15 +373,17 @@
     c.label.textContent = label;
     c.route.hidden = !pending;
     c.off.hidden = p.enabled !== false;
-    const sample = p.sample;
+    if (!holding(id) || !(id in app.shown)) app.shown[id] = p.sample;
+    const sample = app.shown[id];
     c.sampleName.textContent = sample ? (sample.name || sample.id) : 'Sem sample';
     const dur = sample ? fmtDuration(sample.durationMs) : '';
     c.sampleMeta.textContent = selectable ? (dur ? `${dur} · toque para trocar` : 'Toque para escolher') : 'Troca indisponível agora';
     c.sampleBtn.disabled = !online() || !selectable;
     c.sampleBtn.setAttribute('aria-label', `${label}: ${sample ? sample.name || sample.id : 'sem sample'}. Trocar sample.`);
     c.testBtn.hidden = app.state.allowPhoneTest !== true;
-    c.testBtn.disabled = !online();
-    c.testBtn.textContent = `Testar ${label} na mesa`;
+    const audioOn = app.state.audioRunning !== false;
+    c.testBtn.disabled = !online() || !audioOn || !p.sample;
+    c.testBtn.textContent = !audioOn ? `Testar ${label} (áudio parado)` : !p.sample ? `Testar ${label} (sem sample)` : `Testar ${label} na mesa`;
     renderStatus(id);
   }
 
@@ -368,7 +392,7 @@
     const sel = ui.presetSelect;
     const current = (s && s.kit && s.kit.presetId) || '';
     const want = app.presetTouched ? sel.value : current;
-    const sig = app.presets.map((p) => `${p.id}\u0000${p.name}`).join('\u0001');
+    const sig = app.presets.map((p) => `${p.id}\u0000${p.name}\u0000${p.available}`).join('\u0001');
     if (sel.dataset.sig !== sig) {
       sel.dataset.sig = sig;
       sel.textContent = '';
@@ -379,11 +403,12 @@
       for (const p of app.presets) {
         const o = document.createElement('option');
         o.value = p.id;
-        o.textContent = p.name || p.id;
+        o.textContent = p.available === false ? `${p.name || p.id} (falta arquivo no PC)` : p.name || p.id;
+        o.disabled = p.available === false;
         sel.appendChild(o);
       }
     }
-    sel.value = app.presets.some((p) => p.id === want) ? want : '';
+    sel.value = app.presets.some((p) => p.id === want && p.available !== false) ? want : '';
     sel.disabled = !online() || app.presets.length === 0;
     ui.presetApply.disabled = !online() || !sel.value;
     renderStatus('kit');
@@ -448,7 +473,7 @@
     if (!st && target !== 'kit' && app.state) {
       // Troca em andamento pedida por outro aparelho ou pelo PC.
       const p = app.state.pieces.find((x) => x.piece === target);
-      if (p && p.pendingOpId) st = { text: 'Trocando… (pedido de outro aparelho ou do PC)', kind: 'busy' };
+      if (p && p.pendingOpId) st = { text: 'Trocando… (pedido de outro celular)', kind: 'busy' };
     }
     const text = st ? st.text : '';
     const cls = st ? `op-status st-${st.kind}` : 'op-status';
@@ -492,6 +517,7 @@
   function finish(rec) {
     rec.done = true;
     clearTimeout(rec.pollTimer);
+    render(); // solta a seleção segurada por holding()
   }
 
   function showOp(rec) {
@@ -505,7 +531,7 @@
       if (rec.engineConfirmed) {
         finish(rec);
         if (isLatest) setStatus(rec.target, rec.kind === 'preset' ? `Kit «${rec.what}» aplicado` : 'Aplicado', 'ok', 6000);
-      } else if (app.state && app.state.audioRunning === false) {
+      } else if (rec.audioRunning === false || (rec.audioRunning === undefined && app.state && app.state.audioRunning === false)) {
         finish(rec);
         if (isLatest) setStatus(rec.target, rec.kind === 'preset' ? `Kit «${rec.what}» aplicado (áudio parado)` : 'Aplicado (áudio parado)', 'ok', 10000);
       } else if (isLatest) {
@@ -538,6 +564,7 @@
     if (o.opId) rec.opId = o.opId;
     rec.status = String(o.status || '').toLowerCase();
     rec.engineConfirmed = o.engineConfirmed === true;
+    if (typeof o.audioRunning === 'boolean') rec.audioRunning = o.audioRunning;
     rec.errors = Array.isArray(o.errors) ? o.errors : [];
     if (typeof o.resultVersion === 'number') rec.resultVersion = o.resultVersion;
     showOp(rec);
@@ -595,7 +622,7 @@
     }
     if (r.status === 409) {
       const st = r.data && (r.data.state || r.data.currentState);
-      if (isState(st)) applyState(st, false);
+      if (isState(st)) applyState(st, true); // o PC pode ter reiniciado (version menor)
       refreshState();
       failRec(rec, 'Alterado em outro dispositivo. Confira e tente de novo.', 'warn');
       return;
@@ -623,6 +650,14 @@
     handleCommandResponse(rec, r);
   }
 
+  function presetSummary(preset) {
+    const pieces = preset.pieces || {};
+    return PIECE_ORDER.map((id) => {
+      const x = pieces[id] || {};
+      return `${PIECE_LABELS[id]}: ${x.sampleName || (x.sampleId ? x.sampleId.split('/').pop() : 'sem sample')}`;
+    }).join('\n');
+  }
+
   async function onApplyPreset() {
     if (!online()) return;
     const id = ui.presetSelect.value;
@@ -632,7 +667,7 @@
     const name = preset.name || preset.id;
     const ok = await confirmDialog({
       title: 'Aplicar kit?',
-      text: `Trocar as quatro peças pelo kit «${name}». O som novo vale a partir do próximo golpe.`,
+      text: `Trocar as quatro peças pelo kit «${name}». O som novo vale a partir do próximo golpe.\n\n${presetSummary(preset)}`,
       ok: 'Aplicar kit',
     });
     if (!ok) return;
@@ -666,6 +701,8 @@
       if (r.ok) toast(`Teste do ${label} enviado.`);
       else if (r.status === 401) enterPairing('Este celular não está mais autorizado. Pareie de novo.');
       else if (r.status === 403 && problemCode(r) === 'test_not_allowed') { toast('O teste pelo celular está desligado no PC.', 6000); refreshState(); }
+      else if (r.status === 409 && problemCode(r) === 'audio_stopped') { toast('O áudio está parado no PC: o teste não toca.', 6000); refreshState(); }
+      else if (r.status === 409 && problemCode(r) === 'no_sample') { toast(`O ${label} está sem sample.`, 6000); refreshState(); }
       else toast(`Teste não enviado: ${problemText(r, `erro ${r.status}`)}`, 6000);
     } catch {
       toast('Sem resposta do PC. O teste pode não ter tocado.', 6000);
@@ -772,7 +809,11 @@
       closeEvents();
       scheduleReconnect();
     }
-    // CONNECTING: o próprio EventSource tenta de novo.
+    // CONNECTING: o próprio EventSource tenta de novo; confere se o aparelho ainda está pareado (401 = parear de novo).
+    else if (Date.now() - app.lastAuthCheck > 3000) {
+      app.lastAuthCheck = Date.now();
+      refreshState();
+    }
   }
 
   function scheduleReconnect(delay) {
@@ -872,7 +913,8 @@
     if (!app.picker || !app.state) return;
     const piece = app.picker.piece;
     const p = app.state.pieces.find((x) => x.piece === piece);
-    const currentId = p && p.sample ? p.sample.id : '';
+    const shown = piece in app.shown ? app.shown[piece] : p && p.sample;
+    const currentId = shown ? shown.id : '';
     const q = fold(ui.pickerSearch.value.trim());
     const words = q ? q.split(/\s+/) : [];
     const list = app.samples.filter((s) => {
