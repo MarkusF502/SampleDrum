@@ -46,7 +46,7 @@ public static class SyntheticKit
     }
 
     /// <summary>Snare: band-limited noise (the wires) plus a short tone (the head).</summary>
-    private static float[] Snare(int sampleRate, float peakLin, float sustainMs, int seed, float toneHz = 190f, float noiseMix = 0.65f)
+    public static float[] Snare(int sampleRate, float peakLin, float sustainMs, int seed, float toneHz = 190f, float noiseMix = 0.65f)
     {
         double fs = sampleRate;
         int len = (int)Math.Min(fs * 2, Math.Ceiling(sustainMs * 0.001 * fs * 12) + fs * 0.005);
@@ -69,7 +69,7 @@ public static class SyntheticKit
     }
 
     /// <summary>Tom-like: sine with a short downward pitch sweep, exponential decay and a small stick click.</summary>
-    private static float[] Tonal(int sampleRate, float peakLin, float sustainMs, int seed, float startHz, float endHz, float clickLevel)
+    public static float[] Tonal(int sampleRate, float peakLin, float sustainMs, int seed, float startHz, float endHz, float clickLevel)
         => SyntheticSignals.Kick(sampleRate, peakLin, sustainMs, seed, startHz, endHz, clickLevel);
 
     private static float[] Normalize(float[] h, float peakLin)

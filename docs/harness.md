@@ -9,7 +9,8 @@ Há três formas de usar:
 | Forma | Para quê |
 |---|---|
 | `SampleDrum.App.exe --harness <pasta>` | roda o cenário de teste, grava os retornos e o relatório, código de saída 0 = tudo certo |
-| `SampleDrum.App.exe --selftest` | verificações automáticas rápidas (≈ 7 s), código de saída 0 = tudo certo |
+| `SampleDrum.App.exe --harness --swap <pasta>` | troca samples e presets **durante o áudio** e confere no áudio gravado qual sample cada golpe usou (ver "Verificação de trocas") |
+| `SampleDrum.App.exe --selftest` | verificações automáticas rápidas (≈ 11 s), código de saída 0 = tudo certo |
 | `SampleDrum.App.exe --simulation` | abre a janela já no perfil Simulação com o kit sintético (ver "Limitações") |
 
 O mesmo cenário também roda no console multiplataforma: `SampleDrum.Offline --kit <pasta>` (sem a parte em tempo real).
@@ -185,6 +186,64 @@ igreja. Com `--mics` (seus WAVs) o harness também usa os padrões do Core.
   de 8 ms (as demais 5 ms); o erro aparece no relatório (é ele que leva o "erro máx." do surdo a ≈ 5 ms);
 * o valor final sai das gravações da igreja: se o vazamento real do bumbo for mais fraco, dá para baixar o limiar do
   surdo e recuperar os golpes suaves; se for mais forte, subir.
+
+## Verificação de trocas durante o áudio (`--harness --swap`)
+
+```powershell
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+.\SampleDrum.App.exe --harness --swap C:\temp\sd-trocas | Out-Host; $LASTEXITCODE
+.\SampleDrum.App.exe --harness --swap C:\temp\sd-trocas --realtime | Out-Host; $LASTEXITCODE   # + host de simulação em tempo real
+```
+
+(Opções: `--block N`, `--seed S`, `--realtime`, `--speed X` para a rodada em tempo real; `--harness --swap --help`.
+O nome `--harness-swap` também deve funcionar quando a linha que o encaminha estiver no `Program.cs`.)
+
+O que faz: cria uma **biblioteca de demonstração** numa pasta temporária (a mesma do `--simulation`, ver abaixo),
+toca o cenário sintético de 4 peças pelo `KitEngine` com um `KitController` de verdade (o mesmo caminho da janela e
+do celular) e, no meio do áudio:
+
+1. **0,51 s** — troca só o sample do **bumbo** (`bumbos/bumbo-seco.wav`), 10 ms depois de uma batida forte do bumbo
+   (a voz dela ainda está soando);
+2. **7,25 s** — aplica o preset **"Demo Suave"** inteiro (muda as 4 peças), 50 ms depois de uma batida simultânea de
+   bumbo, caixa e tom (três vozes soando) e antes da batida das 4 peças em 7,8 s;
+3. **10,0 s** — tenta o preset **"Demo com erro (arquivo faltando)"** (a caixa aponta para um WAV que não existe).
+
+Como confere (pelo **áudio gravado** de cada retorno, não só pelo estado do motor): o host registra, para cada bloco
+processado, o kit que o bloco tocou (`KitEngine.PlayingKit`) e a geração (`AppliedKitGeneration`). Cada golpe vira
+uma voz (ganho do evento × sample); o harness reconstrói cada retorno golpe a golpe, escolhendo para cada golpe o
+sample candidato que explica o áudio, e exige que **sobre silêncio** (resíduo < −60 dBFS). As verificações:
+
+| Verificação | O que exige |
+|---|---|
+| Sample de cada golpe | o sample identificado no áudio é o do kit em vigor no bloco em que o golpe começou |
+| Nenhuma voz cortada | resíduo da reconstrução < −60 dBFS em todas as peças (uma voz cortada na troca deixaria resíduo) |
+| Troca de uma peça | o 1º golpe depois usa o sample novo; a voz que soava na troca termina com o antigo |
+| As outras três peças | mesmas amostras (mesma referência) e mesmos samples nos golpes até o preset |
+| Preset no mesmo bloco | as 4 peças mudam no **mesmo** limite de bloco, a geração sobe uma vez, nenhum bloco com kit parcial |
+| Preset com WAV faltando | operação `Failed` com erro por peça (`Caixa FileNotFound`), kit e geração iguais até o fim |
+| Sem reinício do áudio | blocos contínuos do começo ao fim, host nunca parado nem com falha |
+
+Arquivos: `relatorio-trocas.md` (operações, verificações e uma linha por golpe), `relatorio-trocas.csv` (uma linha por
+golpe: peça, início, bloco, fase, sample esperado, sample identificado, erro, status) e `retornos-4ch.wav`; com
+`--realtime`, os mesmos em `tempo-real\`. Offline, cada operação termina antes do bloco seguinte (a troca cai no
+bloco logo depois do pedido, determinístico); em tempo real as operações são feitas com o host rodando e caem alguns
+blocos depois (o relatório mostra o bloco real).
+
+## Biblioteca de demonstração do `--simulation`
+
+Com `--simulation`, `StartupOptions.EnsureSimulationLibrary()` cria em `%TEMP%\SampleDrum-simulacao-<pid>`:
+
+* `samples\` com 12 WAVs gerados, 3 variações reconhecíveis por peça: `bumbosumbo-seco/grave/ataque.wav`,
+  `caixas\caixa-seca/aro/aberta.wav`, `tons\tom-agudo/medio/curto.wav`, `surdos\surdo-grave/longo/seco.wav`
+  (formatos variados de propósito: PCM 16/24 bits, float, um a 44,1 kHz e um estéreo, para exercitar conversão e
+  reamostragem);
+* `presets\` com 3 presets (formato `KitPreset`): `demo-rock` ("Demo Rock"), `demo-suave` ("Demo Suave", bumbo
+  −3 dB) e `demo-com-erro` ("Demo com erro (arquivo faltando)", para ver uma falha no PC e no celular).
+
+A pasta é apagada quando o programa termina (e pastas de execuções anteriores que terminaram de forma anormal são
+apagadas na próxima vez). Ela **nunca** é a pasta de samples/presets do operador. A janela (arquivo do worker do
+servidor) deve usar `SamplesFolder`/`PresetsFolder` dessa biblioteca no modo simulação e não gravá-las na
+configuração da igreja.
 
 ## Simulação na janela (`--simulation`) e API para a interface
 

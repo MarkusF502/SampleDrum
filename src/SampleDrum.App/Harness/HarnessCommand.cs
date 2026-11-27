@@ -11,8 +11,11 @@ namespace SampleDrum.App.Harness;
 /// </summary>
 public static class HarnessCommand
 {
+    /// <summary><c>--harness --swap ...</c> runs the swap verification (<see cref="SwapCommand"/>).</summary>
     public static int Run(IReadOnlyList<string> args) =>
-        HarnessCli.Run(args, "SampleDrum.App.exe --harness", Realtime);
+        args.Count > 0 && args[0] == "--swap"
+            ? SwapCommand.Run(args.Skip(1).ToList())
+            : HarnessCli.Run(args, "SampleDrum.App.exe --harness", Realtime);
 
     private static HarnessResult Realtime(KitScenario sc, HarnessCliOptions o, Action<string> log)
     {
