@@ -426,14 +426,24 @@ public sealed class AppConfig
     {
         var copy = Copy();
         copy.Normalize();
-        copy.ActivePresetId = snapshot.ActivePresetId;
+        copy.ApplySnapshot(snapshot);
+        copy.Save(path);
+    }
+
+    /// <summary>
+    /// Copies a controller snapshot into this config (sample, enable and settings per piece, active preset), so that a
+    /// later <see cref="Save(string)"/> for another reason never writes an older kit. The kit master enable is not stored.
+    /// </summary>
+    public void ApplySnapshot(KitStateSnapshot snapshot)
+    {
+        ArgumentNullException.ThrowIfNull(snapshot);
+        ActivePresetId = snapshot.ActivePresetId;
         foreach (var piece in snapshot.Pieces)
         {
-            copy[piece.Piece].SamplePath = piece.SamplePath;
-            copy[piece.Piece].Enabled = piece.Enabled;
-            copy.SetPieceSettings(piece.Piece, piece.Settings);
+            this[piece.Piece].SamplePath = piece.SamplePath;
+            this[piece.Piece].Enabled = piece.Enabled;
+            SetPieceSettings(piece.Piece, piece.Settings);
         }
-        copy.Save(path);
     }
 
     public void Save() => Save(DefaultFilePath);
