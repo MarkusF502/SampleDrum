@@ -27,6 +27,9 @@ samples com os microfones originais na mesa.
   mesmo motor do modo ao vivo. A simulação da janela alimenta as **quatro peças** (kit sintético, quatro WAVs de
   microfone ou um WAV multicanal) e pode tocar uma **prévia** nos fones/alto-falantes do PC. Ver também
   [docs/harness.md](docs/harness.md) (`--harness`, `--simulation`).
+- **Painel do celular** (opcional, desligado por padrão): pelo navegador do celular na rede da igreja, trocar o
+  sample de uma peça ou aplicar um preset com o áudio rodando, depois de parear com um código mostrado no PC. Ver
+  [Painel do celular](#painel-do-celular).
 - Guarda tudo em `%AppData%\SampleDrum\settings.json` (versão 2; canais na numeração da mesa).
 
 ## O que não faz
@@ -88,6 +91,9 @@ dotnet run -c Release --project src/SampleDrum.App
 # cenário de teste completo sem a mesa (relatório e retornos gravados na pasta; código 0 = tudo certo)
 .\src\SampleDrum.App\bin\Release\net10.0-windows\SampleDrum.App.exe --harness C:\temp\sd-teste | Out-Host; $LASTEXITCODE
 
+# trocas de kit durante o processamento (preset/peça/falha) verificadas sem a mesa; código 0 = tudo certo
+.\src\SampleDrum.App\bin\Release\net10.0-windows\SampleDrum.App.exe --harness-swap C:\temp\sd-troca | Out-Host; $LASTEXITCODE
+
 # teste sem hardware; grava a saída num arquivo e mostra o código de saída
 .\src\SampleDrum.App\bin\Release\net10.0-windows\SampleDrum.App.exe --selftest | Out-File selftest.txt; Get-Content selftest.txt; $LASTEXITCODE
 
@@ -117,10 +123,12 @@ Detalhes do ASIO/NAudio: [docs/asio-naudio.md](docs/asio-naudio.md).
   (perfil Simulação = as quatro; perfil Igreja = só o bumbo enquanto os outros estão pendentes).
   **Carregar kit sintético** troca samples e ajustes por os da simulação **sem salvar** nada na configuração; ao
   escolher um driver ASIO, iniciar o ASIO, escolher um sample ou aplicar um preset, o kit e a calibração do operador
-  voltam automaticamente. Uma execução com `--simulation` também não altera o driver, o perfil e a opção de
-  simulação salvos para as execuções normais.
+  voltam automaticamente. Uma execução com `--simulation` **não grava nada** no `settings.json` (não cria nem altera
+  o arquivo); nela, samples e presets vêm de uma biblioteca de demonstração temporária.
 - **Kit**: **Ativar kit / Desativar kit**; preset (**Aplicar preset**, **Abrir arquivo...**,
   **Salvar preset...**); pasta de samples.
+- **Painel do celular**: ligar/parar, rede e porta, endereço + QR code, código de pareamento, celulares
+  autorizados e "Permitir teste pelo celular" (ver [Painel do celular](#painel-do-celular)).
 - Uma faixa por peça (**Bumbo, Caixa, Tom, Surdo**): **Ativa**, rota na numeração da mesa ("Entrada USB 3
   (índice ASIO 2)" ou "pendente"), medidor + LED (verde = disparo, azul = teste), sample (**Escolher WAV...**,
   **Sem sample**), **Ganho (dB)**, **Testar**, limiar/rearme/intervalo mínimo e o grupo **Avançado ▸**
@@ -130,6 +138,87 @@ Detalhes do ASIO/NAudio: [docs/asio-naudio.md](docs/asio-naudio.md).
 Presets ficam em `%AppData%\SampleDrum\Presets` (um `.json` por preset) e a pasta de samples padrão é
 `%AppData%\SampleDrum\Samples` (pode ser trocada). Um preset guarda, por peça, o sample, o ganho e só os
 ajustes de detecção que diferem do padrão da peça.
+
+## Painel do celular
+
+Pelo navegador do celular, **na mesma rede do PC**, o operador troca o sample de uma peça ou aplica um preset de
+kit inteiro com o áudio rodando. Não precisa instalar app, criar conta nem ter internet: a página vem do próprio
+SampleDrum. O áudio continua sendo processado só no PC e **não depende da rede**: se o Wi-Fi cair ou o painel for
+desligado, o áudio e o kit ativo seguem como estão.
+
+### Ligar e parear
+
+1. No grupo **Painel do celular**, escolha a **Rede** (só aparecem adaptadores ativos com IPv4 de rede local;
+   adaptadores virtuais como `vEthernet (WSL)`, VPN e 169.254.x ficam de fora; se houver mais de uma, escolha a da
+   igreja) e a **Porta** (padrão **8750**). Clique em **Ativar painel**. O painel começa **desligado**; a escolha
+   fica salva para a próxima vez (nunca numa execução com `--simulation`).
+   - Se a porta estiver ocupada, aparece uma mensagem clara: escolha outra porta e ative de novo. O áudio não é
+     afetado.
+   - "Só este PC (localhost)" serve para testar no próprio PC. "Todas as redes (0.0.0.0)" existe, mas **não** é
+     recomendado.
+2. O PC mostra o **endereço** (`http://<IP>:8750/`, também `http://<NOMEDOPC>.local:8750/`), um **QR code** e o
+   **código de pareamento** de 6 dígitos com a contagem regressiva. O código vale **5 minutos** e serve para **um**
+   celular; depois de usado, vencido ou após muitas tentativas erradas aparece outro (ou clique em **Gerar novo
+   código**).
+3. No celular: leia o QR code (já leva o código) ou abra o endereço e digite o código. Pronto: o celular fica
+   autorizado (um cookie seguro no navegador dele).
+4. **Celulares autorizados**: lista com nome, data do pareamento e último acesso. **Remover** tira o acesso daquele
+   celular na hora (a página dele fecha a conexão ao vivo e pede o código de novo); **Remover todos** faz o mesmo
+   para todos.
+5. **Permitir teste pelo celular** (desligado por padrão): libera o botão "Testar" no celular, que pede
+   confirmação e toca o sample **na mesa** (pode sair no PA e na transmissão).
+
+### O que o celular pode e não pode
+
+- **Pode:** ver o kit (peças, samples, preset ativo, se o áudio está rodando), trocar o sample de uma peça (só da
+  pasta de samples do PC), aplicar um preset inteiro e, se o PC permitir, testar uma peça.
+- **Não pode:** enviar arquivos, navegar nas pastas do PC, mudar driver/ASIO, rotas, canais USB, nível da mesa,
+  ganho, detecção, ativar/desativar o kit, nem parear outros aparelhos.
+- O celular só mostra a troca **depois** que ela foi aplicada (e confirmada pelo áudio, quando ele está rodando;
+  com o áudio parado aparece "aplicado; áudio parado"). Se outra pessoa (no PC ou em outro celular) mudou a mesma
+  peça antes, o pedido é recusado com "alterado em outro dispositivo" e a tela é atualizada: confira e toque de
+  novo. Ao reconectar, o celular recebe o estado atual e **nunca** reenvia pedidos antigos sozinho.
+- Um preset com algum arquivo faltando não muda nada; o celular mostra o erro por peça.
+- Trocas feitas no celular aparecem na janela do PC na hora e são salvas na configuração como as do PC.
+
+### Rede, firewall e segurança
+
+- Use só em rede local **confiável** (o Wi-Fi da equipe). O painel é HTTP simples, sem HTTPS: alguém com a senha
+  do Wi-Fi poderia capturar o acesso de um celular. Por isso o pareamento, a revogação e o fato de o celular só
+  poder trocar samples/presets. O app **não** abre portas no roteador, **não** usa UPnP e **não** muda o firewall.
+- O PC só aceita pedidos vindos da sub-rede da rede escolhida e do próprio PC, e confere o endereço usado
+  (`Host`/`Origin`).
+- **Firewall do Windows** (uma vez, num PowerShell **como administrador**; o app não roda isso sozinho). Libera a
+  porta só para a sub-rede local e só para o SampleDrum (troque o caminho pelo da pasta do app):
+
+  ```powershell
+  New-NetFirewallRule -DisplayName "SampleDrum - painel celular (LAN)" -Direction Inbound -Action Allow `
+    -Protocol TCP -LocalPort 8750 -Profile Private -RemoteAddress LocalSubnet `
+    -Program "C:\SampleDrum\SampleDrum.App.exe"
+  # equivalente netsh:
+  netsh advfirewall firewall add rule name="SampleDrum - painel celular (LAN)" dir=in action=allow protocol=TCP localport=8750 profile=private remoteip=localsubnet program="C:\SampleDrum\SampleDrum.App.exe"
+  # remover:
+  Remove-NetFirewallRule -DisplayName "SampleDrum - painel celular (LAN)"
+  ```
+
+  - Sem essa regra, o Windows pode mostrar um aviso do firewall na primeira vez que o painel liga numa rede; se o
+    aviso for fechado ou cancelado, o Windows cria uma regra de **bloqueio** para o programa. Para conferir:
+    `Get-NetFirewallApplicationFilter | ? Program -like '*SampleDrum*' | Get-NetFirewallRule | ft DisplayName, Action, Profile`.
+  - Se a rede da igreja estiver como **Pública** (`Get-NetConnectionProfile`), o preferível é passá-la para Privada
+    com o aval de quem cuida da rede (`Set-NetConnectionProfile -InterfaceAlias "<adaptador>" -NetworkCategory Private`);
+    a alternativa é uma regra com `-Profile Public -RemoteAddress LocalSubnet`, mais arriscada em rede aberta.
+- O celular precisa estar no **mesmo Wi-Fi/sub-rede** do PC. Wi-Fi de convidados ou com isolamento de clientes não
+  alcança o PC. Se o IP do PC mudar (DHCP), os celulares precisam parear de novo: peça uma **reserva de IP** no
+  roteador ou use o endereço `.local`.
+
+### Simulação
+
+Com `--simulation`, o painel opera o kit e uma **biblioteca de demonstração** (samples e presets de teste numa pasta
+temporária, apagada ao fechar). Nada dessa execução (kit, presets, pastas, celulares pareados, opções do painel) é
+gravado: o `settings.json` da igreja não é criado nem alterado. Para testar no próprio PC: escolha
+"Só este PC (localhost)", **Ativar painel** e abra `http://localhost:8750/` no navegador.
+
+Detalhes da API (rotas, JSON, erros, eventos): [docs/painel-api.md](docs/painel-api.md).
 
 ## Peças e padrões de detecção
 
@@ -256,5 +345,7 @@ Ainda não confirmado (sem hardware até agora):
 - [docs/asio-naudio.md](docs/asio-naudio.md) — ASIO com NAudio, threads, formatos e índices.
 - [docs/research/lsp-trigger.md](docs/research/lsp-trigger.md) — pesquisa sobre o LSP Trigger (referência
   de comportamento; nenhum código do LSP, que é LGPL-3, foi copiado).
-- [docs/research/painel-movel.md](docs/research/painel-movel.md) — pesquisa e plano do painel de controle pelo
-  celular (próxima entrega; a API do Core para ele já existe, ver "API para o painel" em docs/README-dev.md).
+- [docs/painel-api.md](docs/painel-api.md) — contrato da API do painel do celular (rotas, JSON, erros, eventos SSE,
+  pareamento, ordem dos pedidos).
+- [docs/research/painel-movel.md](docs/research/painel-movel.md) — pesquisa e plano do painel do celular (com o
+  estado do que foi entregue).

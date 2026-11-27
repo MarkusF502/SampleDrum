@@ -2,6 +2,21 @@
 
 Data: 2026-11-25; atualizado em 2026-11-26 para o Core em `ao/sampledrum-core/root` @ `3a4efd5` (seções 5 a 9). Escopo: **só pesquisa e plano**, sem implementação do servidor nem da página. Etiquetas: **[fonte]** = documentação ou página citada; **[observação]** = medido ou testado neste PC de desenvolvimento; **[inferência]** = conclusão nossa, a validar.
 
+> **Estado em 2026-11-27 (v3): implementado.** Servidor `src/SampleDrum.Remote` (Kestrel no processo, SSE + POST
+> JSON, página embutida), grupo **Painel do celular** na janela do PC, contrato em [../painel-api.md](../painel-api.md)
+> e uso no [README](../../README.md#painel-do-celular). Diferenças em relação ao plano abaixo:
+> - `baseVersion` velho **bloqueia** o pedido (`409 stale_state` com o estado atual) em vez de só marcar `conflict`:
+>   uma seleção antiga nunca sobrescreve uma mais nova; o operador confirma e toca de novo.
+> - O app **não** tem o botão "Liberar painel no firewall" (`--setup-firewall`) nem detecta o perfil da rede: os
+>   comandos ficam documentados no README e o app nunca muda o firewall sozinho.
+> - O celular **não** ativa/desativa o kit nem muda ganho nesta entrega (perguntas 3 e 5 da seção 8 em aberto).
+> - Limites: pareamento 5 erros/min por IP e 20/min no total (código invalidado após 10 erros), 5 comandos aceitos
+>   por segundo por aparelho, 4 conexões SSE por aparelho (32 no total), até 16 aparelhos pareados.
+> - Mudança de IP (DHCP): o PC avisa no log e pede para reativar na rede certa (não reinicia sozinho).
+> - `--simulation` usa uma biblioteca de demonstração temporária e **não grava** o `settings.json`.
+> - Validado: compilado, testes automáticos (API em memória, Kestrel real, sessão `--simulation`) e `localhost`
+>   com o app em `--simulation`. **Pendente:** celular real no Wi-Fi (seção 7.3) e checklist na igreja (seção 7.4).
+
 **Objetivo:** pelo navegador do celular, na mesma rede do PC da transmissão, o operador escolhe um sample por peça ou aplica um preset de kit inteiro com o app rodando. O áudio continua sendo processado só no PC e **nunca depende da rede**.
 
 ## Resumo da recomendação
